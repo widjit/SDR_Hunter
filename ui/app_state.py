@@ -20,6 +20,7 @@ import numpy as np
 from config import settings as settings_mod
 from config.settings import Settings, load_json_db
 from core.baseline_manager import BaselineManager
+from core.bookmark_manager import BookmarkManager
 from core.dual_rx_engine import DualRXEngine
 from core.recording_engine import IQRecorder
 from core.sdr_manager import DeviceManager
@@ -72,7 +73,12 @@ class AppState:
             drone_freqs_path=settings_mod.DRONE_FREQS_JSON)
         self.drone_tracker = DroneTracker()
         self.remote_id = RemoteIDDecoder()
-        self.audio_classifier = AudioClassifier()
+        self.audio_classifier = AudioClassifier(
+            db_path=settings_mod.AUDIO_SIGNALS_JSON)
+
+        # Frequency bookmarks.
+        self.bookmark_manager = BookmarkManager(
+            settings_mod.DEFAULT_BOOKMARKS_JSON)
 
         # Live state buffers.
         self._lock = threading.Lock()

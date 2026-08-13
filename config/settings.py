@@ -23,6 +23,9 @@ DEFAULT_DB_PATH = os.path.join(DEFAULT_DATA_DIR, "sdr_hunter.db")
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SIGNALS_JSON = os.path.join(_THIS_DIR, "default_signals.json")
 DRONE_FREQS_JSON = os.path.join(_THIS_DIR, "drone_freqs.json")
+AUDIO_SIGNALS_JSON = os.path.join(_THIS_DIR, "audio_signals.json")
+# Bookmarks live under the config dir (created lazily) so they persist per-user.
+DEFAULT_BOOKMARKS_JSON = os.path.join(DEFAULT_CONFIG_DIR, "bookmarks.json")
 
 
 @dataclass

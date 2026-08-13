@@ -31,7 +31,10 @@ from config import settings as settings_mod
 from .app_state import AppState
 from .dialogs.baseline_dialog import (BaselineManagerDialog,
                                        CaptureBaselineDialog)
+from .dialogs.bookmark_dialog import BookmarkDialog
+from .dialogs.recording_manager_dialog import RecordingManagerDialog
 from .dialogs.settings_dialog import SettingsDialog
+from .views.dual_signal_view import DualSignalView
 from .panels.device_panel import DevicePanelWidget
 from .panels.info_panels import (ATAKPanel, AudioPanel, BaselinePanel,
                                   DroneEventsPanel, LEDIndicator,
@@ -40,8 +43,8 @@ from .qt_adapter import AppSignals
 from .tile_manager import TileManager
 from .views.drone_tracking_view import DroneTrackingView
 from .views.spectrum_hunting_view import SpectrumHuntingView
-from .views.tool_views import (AudioDecoderView, SignalDatabaseView,
-                                WeatherSatView)
+from .views.tool_views import AudioDecoderView, WeatherSatView
+from .views.signal_database_view import SignalDatabaseView
 from .widgets.dual_rx_display import DualRXDisplay
 from .widgets.signal_list import SignalListWidget
 
@@ -63,6 +66,9 @@ class MainWindow(QMainWindow):
         self._web_thread: Optional[threading.Thread] = None
         self._web_server = None
         self._baseline_dialog: Optional[BaselineManagerDialog] = None
+        self._dual_signal_view: Optional[DualSignalView] = None
+        self._bookmark_dialog: Optional[BookmarkDialog] = None
+        self._recording_dialog: Optional[RecordingManagerDialog] = None
         self._extras: Dict = {}
 
         # ATAK bridge (shares settings; disabled until user enables output).
@@ -213,10 +219,13 @@ class MainWindow(QMainWindow):
                   lambda: self._goto_tab("Signal Database"))
         self._act(m_sig, "Add Known Signal", self._add_known_signal)
         self._act(m_sig, "Export Signals", self._export_signals)
+        m_sig.addSeparator()
+        self._act(m_sig, "Bookmarks…", self._open_bookmarks)
 
         m_tools = mb.addMenu("&Tools")
-        self._act(m_tools, "Recording Manager",
-                  lambda: self.docks["recording"].show())
+        self._act(m_tools, "Recording Manager", self._open_recording_manager)
+        self._act(m_tools, "Dual Signal Analysis Mode",
+                  self._open_dual_signal_view)
         self._act(m_tools, "Audio Decoder",
                   lambda: self._goto_tab("Audio Decoder"))
         self._act(m_tools, "Weather Satellite",
@@ -334,6 +343,8 @@ class MainWindow(QMainWindow):
         sl.send_atak_requested.connect(self._send_signal_atak)
         sl.show_on_spectrum_requested.connect(self._show_on_spectrum)
         sl.detail_requested.connect(self._signal_detail)
+        sl.bookmark_requested.connect(self._bookmark_signal)
+        sl.favorite_toggled.connect(self._on_favorite_toggled)
         sl.count_changed.connect(
             lambda n: self.docks["signal_intel"].setWindowTitle(
                 f"Signal Intelligence ({n})"))
@@ -377,6 +388,11 @@ class MainWindow(QMainWindow):
         self.signal_db_view.add_requested.connect(self._add_known_signal_dict)
         self.signal_db_view.delete_requested.connect(self._delete_known_signal)
         self.signal_db_view.export_requested.connect(self._export_signals)
+        self.signal_db_view.edit_requested.connect(self._edit_known_signal)
+        self.signal_db_view.tune_requested.connect(lambda f: self._tune(0, f))
+        self.signal_db_view.import_requested.connect(self._import_signals)
+        self.signal_db_view.find_in_area_requested.connect(
+            self._find_signal_in_area)
 
         self._load_known_signals()
 
@@ -418,6 +434,11 @@ class MainWindow(QMainWindow):
         self._frame_count += 1
         ch = int(frame.get("channel", 0))
         self.dual_display.update_frame(frame)
+        if self._dual_signal_view is not None:
+            try:
+                self._dual_signal_view.update_frame(frame)
+            except Exception:  # noqa: BLE001
+                pass
         if ch == 0:
             self.hunting_view.update_spectrum(frame)
             (self.led_rx0 if ch == 0 else self.led_rx1).set_state("active")
@@ -674,6 +695,85 @@ class MainWindow(QMainWindow):
         self._baseline_dialog.show()
 
     # ==================================================================
+    # Recording manager / dual-signal / bookmarks
+    # ==================================================================
+    def _open_recording_manager(self) -> None:
+        try:
+            out_dir = getattr(self.state.recorder, "out_dir",
+                              self.state.settings.recordings_dir)
+            self._recording_dialog = RecordingManagerDialog(
+                out_dir, self.state.audio_classifier, self.state.matcher, self)
+            self._recording_dialog.finished.connect(
+                lambda _: setattr(self, "_recording_dialog", None))
+            self._recording_dialog.show()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Recording Manager", str(exc))
+
+    def _open_dual_signal_view(self) -> None:
+        if self._dual_signal_view is not None:
+            self._dual_signal_view.raise_()
+            self._dual_signal_view.activateWindow()
+            return
+        self._dual_signal_view = DualSignalView(self)
+        for sig_name, ch in (("tune_rx0_requested", 0),
+                             ("tune_rx1_requested", 1)):
+            sig = getattr(self._dual_signal_view, sig_name, None)
+            if sig is not None:
+                sig.connect(lambda f, c=ch: self._tune(c, f))
+        # Enable dual-signal mode on the engine so RX1 stays parked.
+        try:
+            self.state.engine.set_dual_signal_mode(
+                True, rx0_freq=self.rx0_freq.value() * 1e6,
+                rx1_freq=self.rx1_freq.value() * 1e6)
+        except Exception:  # noqa: BLE001
+            pass
+        self._dual_signal_view.finished.connect(self._on_dual_signal_closed)
+        self._dual_signal_view.show()
+
+    def _on_dual_signal_closed(self, *_a) -> None:
+        self._dual_signal_view = None
+        try:
+            self.state.engine.set_dual_signal_mode(False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _open_bookmarks(self) -> None:
+        if self._bookmark_dialog is not None:
+            self._bookmark_dialog.raise_()
+            self._bookmark_dialog.activateWindow()
+            return
+        self._bookmark_dialog = BookmarkDialog(
+            self.state.bookmark_manager, self)
+        self._bookmark_dialog.tune_requested.connect(lambda f: self._tune(0, f))
+        self._bookmark_dialog.finished.connect(
+            lambda _: setattr(self, "_bookmark_dialog", None))
+        self._bookmark_dialog.show()
+
+    def _bookmark_signal(self, payload: dict) -> None:
+        """Persist a bookmark emitted from the signal list context menu."""
+        try:
+            freq = float(payload.get("freq_hz", 0) or 0)
+            if freq <= 0:
+                return
+            self.state.bookmark_manager.add(
+                freq_hz=freq,
+                name=payload.get("name", ""),
+                modulation=payload.get("modulation")
+                or payload.get("modulation_hint", ""),
+                bandwidth_hz=float(payload.get("bandwidth_hz", 0) or 0),
+                category=payload.get("category", "General"))
+            self.signals.notify_status(
+                f"Bookmarked {freq/1e6:.4f} MHz")
+            if self._bookmark_dialog is not None:
+                self._bookmark_dialog._refresh_folders()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Bookmark", str(exc))
+
+    def _on_favorite_toggled(self, freq_hz: float, is_fav: bool) -> None:
+        state = "added to" if is_fav else "removed from"
+        self.signals.notify_status(f"{freq_hz/1e6:.4f} MHz {state} favorites")
+
+    # ==================================================================
     # Signal DB
     # ==================================================================
     def _load_known_signals(self) -> None:
@@ -733,6 +833,82 @@ class MainWindow(QMainWindow):
             self.signals.notify_status(f"Exported to {os.path.basename(path)}")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Export error", str(exc))
+
+    def _edit_known_signal(self, payload: dict) -> None:
+        """Save an edited signal: replace the old row with updated values."""
+        try:
+            sid = payload.get("id")
+            if sid is not None:
+                self.state.db.delete_known_signal(int(sid))
+            self.state.db.add_known_signal(
+                name=payload["name"],
+                freq_start_hz=payload["freq_start_hz"],
+                freq_end_hz=payload.get("freq_end_hz", payload["freq_start_hz"]),
+                modulation=payload.get("modulation", ""),
+                category=payload.get("category", ""),
+                description=payload.get("description", ""))
+            self._load_known_signals()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "DB error", str(exc))
+
+    def _import_signals(self, path: str) -> None:
+        """Import known signals from a JSON or CSV file."""
+        import csv
+        import json
+        try:
+            rows: list = []
+            if path.lower().endswith(".json"):
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                rows = data if isinstance(data, list) else data.get("signals", [])
+            else:  # CSV
+                with open(path, "r", encoding="utf-8", newline="") as fh:
+                    rows = list(csv.DictReader(fh))
+            added = 0
+            for r in rows:
+                name = r.get("name") or r.get("Name")
+                if not name:
+                    continue
+                def _mhz(*keys):
+                    for k in keys:
+                        v = r.get(k)
+                        if v not in (None, ""):
+                            try:
+                                val = float(v)
+                                return val * 1e6 if val < 1e6 else val
+                            except (TypeError, ValueError):
+                                pass
+                    return None
+                start = _mhz("freq_start_hz", "start_mhz", "Start (MHz)",
+                             "freq_hz", "frequency")
+                if start is None:
+                    continue
+                end = _mhz("freq_end_hz", "end_mhz", "End (MHz)") or start
+                self.state.db.add_known_signal(
+                    name=name, freq_start_hz=start, freq_end_hz=end,
+                    modulation=r.get("modulation") or r.get("Modulation") or "",
+                    category=r.get("category") or r.get("Category") or "",
+                    description=r.get("description") or r.get("Description") or "",
+                    source="import")
+                added += 1
+            self._load_known_signals()
+            self.signals.notify_status(f"Imported {added} signals")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Import error", str(exc))
+
+    def _find_signal_in_area(self, freq_hz: float, span_hz: float) -> None:
+        """Filter the DB view to signals near a frequency and show spectrum."""
+        try:
+            lo = (freq_hz - span_hz / 2) / 1e6
+            hi = (freq_hz + span_hz / 2) / 1e6
+            all_sigs = self.state.db.get_known_signals()
+            near = [s for s in all_sigs
+                    if lo * 1e6 <= float(s.get("freq_start_hz",
+                                               s.get("freq_hz", 0)) or 0) <= hi * 1e6]
+            self.signal_db_view.set_signals(near or all_sigs)
+            self._show_on_spectrum(freq_hz)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _identify(self, freq_hz: float) -> None:
         self._goto_tab("Signal Database")

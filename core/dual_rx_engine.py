@@ -19,8 +19,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
-from typing import Callable, List, Optional
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Callable, Deque, List, Optional
 
 import numpy as np
 
@@ -46,6 +47,27 @@ class RXConfig:
     gain_db: float = 30.0
     bandwidth: float = 2.0e6
     fft_size: int = 4096
+
+
+@dataclass
+class PendingIdentification:
+    """An unknown signal queued for identification (auto-focus / recording)."""
+
+    freq_hz: float
+    bandwidth_hz: float
+    power_db: float = 0.0
+    snr_db: float = 0.0
+    first_seen: float = field(default_factory=time.time)
+    recording_path: str = ""
+    status: str = "queued"   # queued | focusing | recording | done | skipped
+
+    def to_dict(self) -> dict:
+        return {
+            "freq_hz": self.freq_hz, "bandwidth_hz": self.bandwidth_hz,
+            "power_db": self.power_db, "snr_db": self.snr_db,
+            "first_seen": self.first_seen, "recording_path": self.recording_path,
+            "status": self.status,
+        }
 
 
 class DualRXEngine:
@@ -76,11 +98,19 @@ class DualRXEngine:
         self.on_spectrum_data: Optional[SpectrumCB] = None
         self.on_signal_detected: Optional[SignalCB] = None
         self.on_unknown_signal: Optional[SignalCB] = None
+        self.on_pending_updated: Optional[Callable[[List[dict]], None]] = None
 
         # Focus state.
         self._focus_freq: Optional[float] = None
         self._focus_until: Optional[float] = None
         self._focus_recording = False
+        self._manual_focus = False   # True when user manually tuned RX1
+
+        # Pending-identification queue for unknown signals.
+        self.pending_queue: Deque[PendingIdentification] = deque(maxlen=200)
+        self._pending_seen: set = set()   # freq keys already queued
+        self.dual_signal_mode = False     # both RX parked for comparison
+        self._park_center: Optional[float] = None  # RX0 park freq in dual mode
 
         self._worker: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
@@ -171,9 +201,18 @@ class DualRXEngine:
     # Focus control
     # ------------------------------------------------------------------
     def focus_rx1(self, freq: float, bandwidth: Optional[float] = None,
-                  duration_s: Optional[float] = None) -> None:
-        """Lock RX1 onto a specific frequency (optionally for a duration)."""
+                  duration_s: Optional[float] = None,
+                  manual: bool = False) -> None:
+        """Lock RX1 onto a specific frequency (optionally for a duration).
+
+        When ``manual`` is True this is a user-initiated tune: any in-progress
+        auto-focus/auto-record is interrupted first, and the auto-focus loop is
+        prevented from overriding the manual selection until it is released.
+        """
+        if manual:
+            self.interrupt_auto_focus()
         with self._lock:
+            self._manual_focus = manual or self._manual_focus
             self._focus_freq = freq
             self._focus_until = (time.time() + duration_s) if duration_s else None
             if bandwidth:
@@ -182,6 +221,91 @@ class DualRXEngine:
                 self.focus_dev.set_frequency(self._focus_channel, freq)
                 if bandwidth:
                     self.focus_dev.set_bandwidth(self._focus_channel, bandwidth)
+
+    def interrupt_auto_focus(self) -> None:
+        """Stop any auto-focus recording currently in progress on RX1."""
+        with self._lock:
+            was_recording = self._focus_recording
+        if was_recording and self.recorder is not None:
+            try:
+                meta = self.recorder.stop()
+                if meta:
+                    self._mark_pending_done(meta.center_freq_hz, meta.path)
+            except Exception:  # noqa: BLE001
+                pass
+        with self._lock:
+            self._focus_recording = False
+            self._focus_until = None
+
+    def release_manual_focus(self) -> None:
+        """Release the manual-focus lock so auto-focus can resume."""
+        with self._lock:
+            self._manual_focus = False
+            self._focus_freq = None
+            self._focus_until = None
+
+    # ------------------------------------------------------------------
+    # Pending identification queue
+    # ------------------------------------------------------------------
+    def _enqueue_pending(self, ev: SignalEvent) -> None:
+        key = int(round(ev.freq_hz / 1e3))
+        if key in self._pending_seen:
+            return
+        self._pending_seen.add(key)
+        self.pending_queue.append(PendingIdentification(
+            freq_hz=ev.freq_hz, bandwidth_hz=ev.bandwidth_hz,
+            power_db=getattr(ev, "power_db", 0.0),
+            snr_db=getattr(ev, "snr_db", 0.0)))
+        self._notify_pending()
+
+    def _mark_pending_done(self, freq_hz: float, path: str = "") -> None:
+        key = int(round(freq_hz / 1e3))
+        for p in self.pending_queue:
+            if int(round(p.freq_hz / 1e3)) == key and p.status != "done":
+                p.status = "done"
+                p.recording_path = path or p.recording_path
+                break
+        self._notify_pending()
+
+    def _notify_pending(self) -> None:
+        if self.on_pending_updated:
+            try:
+                self.on_pending_updated([p.to_dict() for p in self.pending_queue])
+            except Exception:  # noqa: BLE001
+                pass
+
+    def get_pending(self) -> List[dict]:
+        """Return the current pending-identification queue as dicts."""
+        return [p.to_dict() for p in self.pending_queue]
+
+    def clear_pending(self) -> None:
+        self.pending_queue.clear()
+        self._pending_seen.clear()
+        self._notify_pending()
+
+    def set_dual_signal_mode(self, enabled: bool, rx0_freq: Optional[float] = None,
+                             rx1_freq: Optional[float] = None) -> None:
+        """Park both receivers on specific signals for side-by-side comparison.
+
+        In dual-signal mode RX0 stops sweeping (parks on ``rx0_freq``) and RX1
+        parks on ``rx1_freq``; auto-focus of unknown signals is suspended.
+        """
+        with self._lock:
+            self.dual_signal_mode = enabled
+            self._park_center = rx0_freq if enabled else None
+        if enabled:
+            self.scheduler.stop()
+            if rx0_freq is not None and self.scanner_dev is not None:
+                try:
+                    self.scanner_dev.set_frequency(self._scanner_channel,
+                                                   rx0_freq)
+                except Exception:  # noqa: BLE001
+                    pass
+            if rx1_freq is not None:
+                self.focus_rx1(rx1_freq, manual=True)
+        else:
+            self.release_manual_focus()
+            self.scheduler.start()
 
     def auto_record_unknown(self, signal_event: SignalEvent) -> None:
         """Auto-record an unknown signal on RX1 for ``auto_record_seconds``."""
@@ -201,6 +325,13 @@ class DualRXEngine:
                          f"{signal_event.freq_hz/1e6:.4f} MHz"),
         )
         self._focus_recording = True
+        # Update pending-queue status for this signal.
+        key = int(round(signal_event.freq_hz / 1e3))
+        for p in self.pending_queue:
+            if int(round(p.freq_hz / 1e3)) == key:
+                p.status = "recording"
+                break
+        self._notify_pending()
         logger.info("Auto-recording unknown signal at %.4f MHz",
                     signal_event.freq_hz / 1e6)
 
@@ -225,7 +356,9 @@ class DualRXEngine:
                 time.sleep(0.1)
 
     def _scan_step(self, cfg: RXConfig) -> None:
-        center = self.scheduler.current_center
+        center = (self._park_center if (self.dual_signal_mode
+                  and self._park_center is not None)
+                  else self.scheduler.current_center)
         if center is None or self.scanner_dev is None:
             time.sleep(0.05)
             return
@@ -242,9 +375,15 @@ class DualRXEngine:
             if not ev.is_known:
                 if self.on_unknown_signal:
                     self.on_unknown_signal(ev)
-                if (self.recorder is not None and not self.recorder.is_recording):
+                # Queue for identification; auto-focus only when not busy and
+                # not overridden by a manual tune / dual-signal comparison.
+                self._enqueue_pending(ev)
+                if (self.recorder is not None
+                        and not self.recorder.is_recording
+                        and not self._manual_focus
+                        and not self.dual_signal_mode):
                     self.auto_record_unknown(ev)
-        if self.scheduler.should_hop():
+        if not self.dual_signal_mode and self.scheduler.should_hop():
             self.scheduler.next_center()
 
     def _focus_step(self) -> None:
@@ -267,12 +406,19 @@ class DualRXEngine:
                                   cfg.sample_rate, psd)
 
     def _end_focus(self) -> None:
+        done_meta = None
         with self._lock:
+            # A manual focus without a timed duration stays put.
+            if self._manual_focus and self._focus_until is None:
+                return
             self._focus_freq = None
             self._focus_until = None
             if self._focus_recording and self.recorder is not None:
-                meta = self.recorder.stop()
-                if meta:
+                done_meta = self.recorder.stop()
+                if done_meta:
                     logger.info("Finished auto-recording: %s (%.1fs)",
-                                meta.path, meta.duration_s)
+                                done_meta.path, done_meta.duration_s)
             self._focus_recording = False
+            self._manual_focus = False
+        if done_meta is not None:
+            self._mark_pending_done(done_meta.center_freq_hz, done_meta.path)

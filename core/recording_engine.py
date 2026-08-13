@@ -155,6 +155,157 @@ def load_recording(data_path: str) -> np.ndarray:
     return np.fromfile(data_path, dtype=np.complex64)
 
 
+def _meta_path_for(data_path: str) -> str:
+    if data_path.endswith(".sigmf-data"):
+        return data_path.replace(".sigmf-data", ".sigmf-meta")
+    return data_path + ".sigmf-meta"
+
+
+def read_meta(data_path: str) -> Dict[str, Any]:
+    """Read the SigMF-style metadata sidecar for a recording."""
+    meta_path = _meta_path_for(data_path)
+    if not os.path.exists(meta_path):
+        return {}
+    try:
+        with open(meta_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def export_wav(data_path: str, wav_path: Optional[str] = None,
+               mode: str = "fm", audio_rate: int = 48000,
+               sample_rate_hz: Optional[float] = None) -> str:
+    """Demodulate an IQ recording to audio and write a WAV file.
+
+    ``mode`` selects the demodulator: ``"fm"`` (default), ``"am"`` or ``"raw"``
+    (magnitude of the IQ). Returns the path to the written WAV file.
+    """
+    from decoders.audio_player import write_wav
+
+    iq = load_recording(data_path)
+    doc = read_meta(data_path)
+    if sample_rate_hz is None:
+        sample_rate_hz = float(doc.get("global", {})
+                               .get("core:sample_rate", 48000.0) or 48000.0)
+    wav_path = wav_path or (os.path.splitext(data_path)[0] + ".wav")
+
+    audio: np.ndarray
+    try:
+        if mode == "fm":
+            from decoders.fm_decoder import FMDecoder
+            res = FMDecoder(audio_rate=audio_rate).demodulate(
+                iq, sample_rate_hz, decode_rds=False)
+            audio = np.asarray(getattr(res, "audio", []), dtype=np.float32)
+            audio_rate = int(getattr(res, "audio_rate", audio_rate))
+        elif mode == "am":
+            from decoders.am_decoder import AMDecoder
+            res = AMDecoder(audio_rate=audio_rate).demodulate(iq, sample_rate_hz)
+            audio = np.asarray(getattr(res, "audio", []), dtype=np.float32)
+            audio_rate = int(getattr(res, "audio_rate", audio_rate))
+        else:  # raw envelope
+            audio = np.abs(iq).astype(np.float32)
+            audio_rate = int(sample_rate_hz)
+    except Exception:  # noqa: BLE001 - fall back to envelope
+        audio = np.abs(iq).astype(np.float32)
+        audio_rate = int(sample_rate_hz)
+
+    if audio.size:
+        peak = float(np.max(np.abs(audio))) or 1.0
+        audio = (audio / peak) * 0.9
+    write_wav(wav_path, audio, audio_rate)
+    return wav_path
+
+
+def annotate_recording(data_path: str, comment: str = "",
+                       freq_lo_hz: Optional[float] = None,
+                       freq_hi_hz: Optional[float] = None,
+                       label: str = "", sample_start: int = 0,
+                       sample_count: Optional[int] = None) -> Dict[str, Any]:
+    """Append a SigMF annotation to a recording's metadata sidecar."""
+    meta_path = _meta_path_for(data_path)
+    doc = read_meta(data_path) or {"global": {}, "captures": [], "annotations": []}
+    doc.setdefault("annotations", [])
+    ann: Dict[str, Any] = {
+        "core:sample_start": int(sample_start),
+        "core:comment": comment,
+        "core:label": label,
+    }
+    if sample_count is not None:
+        ann["core:sample_count"] = int(sample_count)
+    if freq_lo_hz is not None:
+        ann["core:freq_lower_edge"] = float(freq_lo_hz)
+    if freq_hi_hz is not None:
+        ann["core:freq_upper_edge"] = float(freq_hi_hz)
+    ann["sdrhunter:added_at"] = time.time()
+    doc["annotations"].append(ann)
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2)
+    return ann
+
+
+def identify_recording(data_path: str, classifier: Any = None,
+                       matcher: Any = None) -> Dict[str, Any]:
+    """Attempt to identify a recording's signal.
+
+    Uses an :class:`AudioClassifier`-like object (``classify``) and/or a known
+    signal ``matcher`` (``match`` by frequency). Stores the result in the
+    metadata sidecar under ``sdrhunter:identification`` and returns it.
+    """
+    doc = read_meta(data_path)
+    g = doc.get("global", {})
+    caps = doc.get("captures", [{}])
+    freq_hz = float(caps[0].get("core:frequency", 0.0) or 0.0)
+    sample_rate = float(g.get("core:sample_rate", 0.0) or 0.0)
+    result: Dict[str, Any] = {"freq_hz": freq_hz}
+
+    if matcher is not None and freq_hz:
+        try:
+            match = matcher.match(freq_hz)
+            if match:
+                result["known_signal"] = getattr(match, "label",
+                                                  getattr(match, "name", str(match)))
+        except Exception:  # noqa: BLE001
+            pass
+
+    if classifier is not None:
+        try:
+            iq = load_recording(data_path)
+            audio = np.abs(iq).astype(np.float32)
+            cls = classifier.classify(freq_hz=freq_hz, audio=audio,
+                                      audio_rate=int(sample_rate) or 48000)
+            if cls is not None:
+                result["classification"] = (cls.to_dict()
+                                             if hasattr(cls, "to_dict") else str(cls))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Persist into metadata.
+    meta_path = _meta_path_for(data_path)
+    if doc:
+        doc.setdefault("global", {})["sdrhunter:identification"] = result
+        try:
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump(doc, fh, indent=2)
+        except OSError:
+            pass
+    return result
+
+
+def delete_recording(data_path: str) -> bool:
+    """Delete a recording's data file and its metadata sidecar."""
+    removed = False
+    for path in (data_path, _meta_path_for(data_path),
+                 os.path.splitext(data_path)[0] + ".wav"):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                removed = True
+            except OSError:
+                pass
+    return removed
+
+
 def list_recordings(out_dir: str) -> List[Dict[str, Any]]:
     """List recordings in a directory using their SigMF metadata sidecars."""
     out: List[Dict[str, Any]] = []
