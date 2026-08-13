@@ -1,0 +1,44 @@
+# SDR Hunter Python dependencies
+#
+# NOTE: SoapySDR Python bindings are NOT installed via pip — they are provided
+# by the system SoapySDR build together with the per-device driver modules.
+# Run ./install_drivers.sh to install SoapySDR + all SDR drivers, or install
+# python3-soapysdr via your package manager. The app runs with a synthetic mock
+# device if SoapySDR is absent.
+
+# --- Core numerics / DSP ---
+numpy>=1.24
+scipy>=1.10
+
+# --- Desktop UI (Phase 2) ---
+PyQt6>=6.5
+pyqtgraph>=0.13
+
+# --- Web server / remote UI ---
+fastapi>=0.110
+uvicorn[standard]>=0.27
+websockets>=12.0
+aiofiles>=23.0
+httpx>=0.26
+aiohttp>=3.9
+requests>=2.31
+
+# --- Data / persistence ---
+SQLAlchemy>=2.0
+
+# --- IQ recording format ---
+sigmf>=1.1
+
+# --- Audio I/O ---
+sounddevice>=0.4
+PyAudio>=0.2.13
+
+# --- Mapping / imaging ---
+folium>=0.15
+Pillow>=10.0
+matplotlib>=3.7
+
+# --- Protocol decoding helpers ---
+construct>=2.10
+crcmod>=1.7
+bitarray>=2.9

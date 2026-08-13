@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "description": "Known drone control, video, and Remote ID frequencies used for heuristic drone signal detection.",
+  "control_links": [
+    {"name": "DJI OcuSync 2.4G", "manufacturer": "DJI", "freq_start_hz": 2400000000, "freq_end_hz": 2483500000, "typical_bw_hz": 10000000, "modulation": "OFDM-FHSS", "role": "control+video"},
+    {"name": "DJI OcuSync 5.8G", "manufacturer": "DJI", "freq_start_hz": 5725000000, "freq_end_hz": 5850000000, "typical_bw_hz": 10000000, "modulation": "OFDM-FHSS", "role": "control+video"},
+    {"name": "DJI 900 MHz", "manufacturer": "DJI", "freq_start_hz": 902000000, "freq_end_hz": 928000000, "typical_bw_hz": 10000000, "modulation": "OFDM-FHSS", "role": "control"},
+    {"name": "ExpressLRS 900", "manufacturer": "ExpressLRS", "freq_start_hz": 900000000, "freq_end_hz": 930000000, "typical_bw_hz": 500000, "modulation": "LoRa-FHSS", "role": "control"},
+    {"name": "ExpressLRS 2.4G", "manufacturer": "ExpressLRS", "freq_start_hz": 2400000000, "freq_end_hz": 2480000000, "typical_bw_hz": 800000, "modulation": "LoRa-FHSS", "role": "control"},
+    {"name": "TBS Crossfire", "manufacturer": "TBS", "freq_start_hz": 868000000, "freq_end_hz": 915000000, "typical_bw_hz": 250000, "modulation": "FHSS", "role": "control"},
+    {"name": "FrSky ACCST/ACCESS", "manufacturer": "FrSky", "freq_start_hz": 2400000000, "freq_end_hz": 2483500000, "typical_bw_hz": 1500000, "modulation": "FHSS", "role": "control"},
+    {"name": "Spektrum DSMX", "manufacturer": "Spektrum", "freq_start_hz": 2400000000, "freq_end_hz": 2483500000, "typical_bw_hz": 1500000, "modulation": "DSSS-FHSS", "role": "control"},
+    {"name": "Autel SkyLink", "manufacturer": "Autel", "freq_start_hz": 2400000000, "freq_end_hz": 2483500000, "typical_bw_hz": 10000000, "modulation": "OFDM-FHSS", "role": "control+video"},
+    {"name": "Parrot WiFi", "manufacturer": "Parrot", "freq_start_hz": 2400000000, "freq_end_hz": 2483500000, "typical_bw_hz": 20000000, "modulation": "OFDM-WiFi", "role": "control+video"},
+    {"name": "Skydio WiFi", "manufacturer": "Skydio", "freq_start_hz": 5150000000, "freq_end_hz": 5850000000, "typical_bw_hz": 20000000, "modulation": "OFDM-WiFi", "role": "control+video"}
+  ],
+  "video_links": [
+    {"name": "FPV Analog 5.8G RaceBand", "freq_start_hz": 5645000000, "freq_end_hz": 5945000000, "typical_bw_hz": 6000000, "modulation": "WBFM-analog", "role": "video"},
+    {"name": "FPV Analog 1.2/1.3G", "freq_start_hz": 1080000000, "freq_end_hz": 1360000000, "typical_bw_hz": 6000000, "modulation": "WBFM-analog", "role": "video"},
+    {"name": "DJI Digital FPV 5.8G", "freq_start_hz": 5725000000, "freq_end_hz": 5850000000, "typical_bw_hz": 20000000, "modulation": "OFDM", "role": "video"},
+    {"name": "HDZero 5.8G", "freq_start_hz": 5645000000, "freq_end_hz": 5945000000, "typical_bw_hz": 27000000, "modulation": "OFDM", "role": "video"}
+  ],
+  "remote_id": [
+    {"name": "OpenDroneID WiFi Beacon 2.4G", "freq_start_hz": 2412000000, "freq_end_hz": 2462000000, "typical_bw_hz": 20000000, "modulation": "WiFi-Beacon", "role": "remote_id"},
+    {"name": "OpenDroneID WiFi NAN 2.4G", "freq_start_hz": 2437000000, "freq_end_hz": 2437000000, "typical_bw_hz": 20000000, "modulation": "WiFi-NAN", "role": "remote_id"},
+    {"name": "OpenDroneID BT4 Legacy", "freq_start_hz": 2402000000, "freq_end_hz": 2480000000, "typical_bw_hz": 2000000, "modulation": "BLE-Legacy-Adv", "role": "remote_id"},
+    {"name": "OpenDroneID BT5 Long Range", "freq_start_hz": 2402000000, "freq_end_hz": 2480000000, "typical_bw_hz": 2000000, "modulation": "BLE-Ext-Adv", "role": "remote_id"}
+  ]
+}

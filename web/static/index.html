@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SDR Hunter</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>SDR&nbsp;HUNTER</h1>
+    <span><span id="statusDot" class="status-dot"></span><span id="statusText">idle</span></span>
+
+    <label>Device</label>
+    <select id="deviceSel"><option>loading…</option></select>
+
+    <label>Start (MHz)</label>
+    <input id="freqStart" type="number" value="88" step="0.1" />
+    <label>End (MHz)</label>
+    <input id="freqEnd" type="number" value="108" step="0.1" />
+    <label>Rate (MSPS)</label>
+    <select id="rateSel">
+      <option value="2048000">2.048</option>
+      <option value="2400000">2.4</option>
+      <option value="8000000">8</option>
+      <option value="10000000">10</option>
+      <option value="20000000">20</option>
+    </select>
+
+    <button id="startBtn" class="primary">Start Scan</button>
+    <button id="stopBtn" class="stop">Stop</button>
+  </header>
+
+  <main>
+    <div class="left">
+      <div class="panel">
+        <h2>Waterfall</h2>
+        <canvas id="waterfall"></canvas>
+      </div>
+      <div class="panel">
+        <h2>Spectrum
+          <span class="legend">— peak hold (amber), live (cyan)</span>
+        </h2>
+        <canvas id="spectrum"></canvas>
+      </div>
+    </div>
+
+    <div class="right">
+      <div class="panel" style="margin-bottom:10px;">
+        <h2>Detected Signals</h2>
+        <div class="legend">
+          <span class="tag known">known</span>
+          <span class="tag unknown">unknown</span>
+          <span class="tag drone">drone</span>
+        </div>
+      </div>
+      <div id="signalList"></div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

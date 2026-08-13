@@ -1,0 +1,28 @@
+# Optional / heavy dependencies for advanced decoding.
+# Install as needed:  pip install -r requirements_optional.txt
+#
+# GNU Radio is best installed via the system package manager (apt install
+# gnuradio) or conda; the pip package below is a convenience wrapper and may
+# require build tooling.
+
+# Digital signal / SDR frameworks
+# gnuradio                       # install via apt/conda preferably
+
+# Weather satellite / image processing
+scikit-image>=0.22
+opencv-python>=4.9
+
+# Machine-learning based audio/signal classification (future)
+scikit-learn>=1.4
+
+# Satellite tracking (pass prediction for weather sats)
+pyephem>=9.99
+skyfield>=1.48
+sgp4>=2.23
+
+# ADS-B / AIS decoding helpers
+pyModeS>=2.13
+
+# Bluetooth / WiFi Remote ID sniffing (Linux, requires capable adapter)
+pyshark>=0.6
+bleak>=0.21
