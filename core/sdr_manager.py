@@ -12,6 +12,7 @@ Public classes:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -223,6 +224,11 @@ class DeviceManager:
         self.allow_mock = allow_mock
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _force_mock() -> bool:
+        """True when the ``--mock`` flag set ``SDRHUNTER_FORCE_MOCK=1``."""
+        return os.environ.get("SDRHUNTER_FORCE_MOCK") == "1"
+
     def enumerate_devices(self) -> List[Dict[str, str]]:
         """Return a list of available devices.
 
@@ -231,7 +237,7 @@ class DeviceManager:
         ``allow_mock``).
         """
         devices: List[Dict[str, str]] = []
-        if HAVE_SOAPY:  # pragma: no cover - hardware dependent
+        if HAVE_SOAPY and not self._force_mock():  # pragma: no cover - hardware dependent
             try:
                 for res in SoapySDR.Device.enumerate():
                     entry = {k: res[k] for k in res.keys()}

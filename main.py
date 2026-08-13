@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """SDR Hunter entry point.
 
-Launches either the Qt desktop application (default, Phase 2) or the web server
-for remote access. In Phase 1 the Qt UI is a placeholder; the web UI is fully
-functional and can be launched with ``--web``.
+Launches the PyQt6 desktop application (default), the FastAPI web server
+(headless remote UI), or both together. A synthetic mock SDR device is always
+available so the app runs with no hardware / no SoapySDR installed.
 
 Examples
 --------
-    python main.py --web                 # start the web server
+    python main.py                 # launch the desktop GUI (default)
+    python main.py --gui           # explicit desktop GUI
+    python main.py --web           # headless web server only
+    python main.py --both          # GUI + embedded web server
     python main.py --web --port 8080
-    python main.py --list-devices        # enumerate SDR devices
-    python main.py                       # launch desktop app (or web fallback)
+    python main.py --list-devices  # enumerate SDR devices and exit
+    python main.py --mock          # force the synthetic mock device
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 
@@ -27,22 +31,33 @@ def _configure_logging(verbose: bool) -> None:
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="SDR Hunter — multi-SDR signal hunting suite")
+    p = argparse.ArgumentParser(
+        description="SDR Hunter — multi-SDR signal hunting suite")
     mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--gui", action="store_true",
+                      help="Launch the PyQt6 desktop application (default).")
     mode.add_argument("--web", action="store_true",
-                      help="Run the web server (remote UI) instead of desktop.")
+                      help="Run only the web server (headless remote UI).")
+    mode.add_argument("--both", action="store_true",
+                      help="Launch the desktop GUI with an embedded web server.")
     mode.add_argument("--desktop", action="store_true",
-                      help="Force the Qt desktop application.")
-    p.add_argument("--host", default=None, help="Web server host (default from settings).")
+                      help=argparse.SUPPRESS)  # backwards-compatible alias
+    p.add_argument("--host", default=None, help="Web server host.")
     p.add_argument("--port", type=int, default=None, help="Web server port.")
     p.add_argument("--list-devices", action="store_true",
                    help="List available SDR devices and exit.")
-    p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
+    p.add_argument("--mock", action="store_true",
+                   help="Force the synthetic mock device even if hardware "
+                        "is present.")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="Verbose logging.")
     return p.parse_args(argv)
 
 
-def list_devices() -> int:
+def list_devices(force_mock: bool = False) -> int:
     from core.sdr_manager import DeviceManager
+    if force_mock:
+        os.environ["SDRHUNTER_FORCE_MOCK"] = "1"
     dm = DeviceManager(allow_mock=True)
     devices = dm.enumerate_devices()
     print(f"SoapySDR available: {dm.soapy_available()}")
@@ -53,33 +68,49 @@ def list_devices() -> int:
     return 0
 
 
-def run_web(host, port) -> int:
+def run_web(host, port, force_mock: bool = False) -> int:
     try:
         from web import server
     except Exception as exc:  # noqa: BLE001
         print(f"Web dependencies not available: {exc}", file=sys.stderr)
         print("Install with: pip install -r requirements.txt", file=sys.stderr)
         return 1
+    if force_mock:
+        os.environ["SDRHUNTER_FORCE_MOCK"] = "1"
     server.run(host=host, port=port)
     return 0
 
 
-def run_desktop() -> int:
-    """Launch the Qt desktop app if PyQt6 is available; else fall back to web."""
+def run_gui(embed_web: bool = False, force_mock: bool = False) -> int:
+    """Launch the Qt desktop app; fall back to the web UI if PyQt6 is missing."""
     try:
-        from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow  # type: ignore
-    except Exception:
-        print("PyQt6 not installed — desktop UI arrives in Phase 2.")
-        print("Starting the web UI instead (use --web to do this explicitly).")
-        return run_web(None, None)
+        from PyQt6.QtWidgets import QApplication
+    except Exception:  # noqa: BLE001
+        print("PyQt6 not installed — cannot launch the desktop UI.")
+        print("Install it with: pip install PyQt6 pyqtgraph")
+        print("Falling back to the web UI (use --web to do this explicitly).")
+        return run_web(None, None, force_mock)
+
+    if force_mock:
+        os.environ["SDRHUNTER_FORCE_MOCK"] = "1"
+
+    from ui.app_state import AppState
+    from ui.main_window import MainWindow
 
     app = QApplication(sys.argv)
-    win = QMainWindow()
-    win.setWindowTitle("SDR Hunter")
-    win.resize(1200, 800)
-    win.setCentralWidget(QLabel(
-        "SDR Hunter — desktop UI is implemented in Phase 2.\n"
-        "Run with --web for the functional web interface."))
+    app.setApplicationName("SDR Hunter")
+
+    # Apply the dark theme stylesheet.
+    qss_path = os.path.join(os.path.dirname(__file__), "ui", "themes", "dark.qss")
+    if os.path.exists(qss_path):
+        try:
+            with open(qss_path, "r", encoding="utf-8") as fh:
+                app.setStyleSheet(fh.read())
+        except OSError:
+            pass
+
+    state = AppState()
+    win = MainWindow(app_state=state, embed_web=embed_web)
     win.show()
     return app.exec()
 
@@ -89,10 +120,13 @@ def main(argv=None) -> int:
     _configure_logging(args.verbose)
 
     if args.list_devices:
-        return list_devices()
+        return list_devices(force_mock=args.mock)
     if args.web:
-        return run_web(args.host, args.port)
-    return run_desktop()
+        return run_web(args.host, args.port, force_mock=args.mock)
+    if args.both:
+        return run_gui(embed_web=True, force_mock=args.mock)
+    # Default (and --gui / legacy --desktop): the desktop application.
+    return run_gui(embed_web=False, force_mock=args.mock)
 
 
 if __name__ == "__main__":
