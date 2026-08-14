@@ -139,6 +139,76 @@ install only if you need them:
 pip install -r requirements_optional.txt   # scikit-image, opencv, sgp4, skyfield, pyModeS, …
 ```
 
+### Arch / CachyOS (pacman + venv + fish)
+
+Arch-based distros (including **CachyOS**) need a slightly different flow for
+two reasons: they enforce **PEP 668** (so a system-wide `pip install` is
+blocked), and their default shell on CachyOS is **fish** (so the usual
+`activate` script does not work). Follow these steps.
+
+**1. System packages (pacman).** The SoapySDR and PyQt6 bindings are **not**
+pip-installable on Arch — install them from the official `extra` repo:
+
+```bash
+sudo pacman -S soapysdr soapyrtlsdr soapyhackrf soapybladerf soapyuhd libuhd rtl-sdr hackrf libusb portaudio python-pyqt6 python-pyqt6-webengine
+```
+
+Watch out for the Debian → Arch package-name differences that trip people up:
+
+| Debian/Ubuntu | Arch/CachyOS | Note |
+|---|---|---|
+| `uhd-host` / `uhd` | **`libuhd`** | Provides USRP host tools (`uhd_find_devices`, `uhd_usrp_probe`); Soapy module is `soapyuhd`. |
+| `python3-pyqt6.qtwebengine` / `pyqt6-webengine` | **`python-pyqt6-webengine`** | Pulls in `python-pyqt6`, `qt6-base`, `qt6-webengine`. |
+| `portaudio19-dev` | **`portaudio`** | Must be installed **before** `pip` builds PyAudio, or the build fails. |
+
+> **AUR-only drivers.** The Soapy modules for **LimeSDR, PlutoSDR, SDRplay and
+> Airspy** are not in the official repos — they live in the AUR. CachyOS ships
+> the [`paru`](https://github.com/Morganamilo/paru) AUR helper, e.g.:
+> ```bash
+> paru -S soapylms7 soapysdrplay3 soapyairspy limesuite
+> ```
+> (Exact AUR package names vary — treat this as guidance, not a guaranteed list.)
+
+> **WebEngine is optional.** `python-pyqt6-webengine` only powers the in-app
+> map widget. If you skip it the app still runs — the map is simply disabled.
+
+**2. Create a virtualenv (required on Arch).** Because of PEP 668 you must use a
+venv. Create it with **`--system-site-packages`** so the venv can *see* the
+pacman-installed SoapySDR / PyQt6 bindings (which are system packages, not on
+PyPI):
+
+```bash
+python -m venv --system-site-packages .venv
+```
+
+> **Do not** use `pip install --break-system-packages` — it risks corrupting the
+> system Python that pacman manages. Use the venv instead.
+
+**3. Activate the venv — the command depends on your shell.**
+
+```bash
+# bash / zsh
+source .venv/bin/activate
+
+# fish (CachyOS default)
+source .venv/bin/activate.fish
+```
+
+You can also skip activation entirely and call the venv binaries directly, e.g.
+`.venv/bin/python` and `.venv/bin/pip`.
+
+> **Seeing `case builtin not inside of switch block`?** That means you are in
+> **fish** but sourced the bash `activate` script. Use `activate.fish` instead
+> (or call `.venv/bin/python` directly).
+
+**4. Install the Python deps and verify:**
+
+```bash
+pip install -r requirements.txt
+python tools/bringup_check.py     # sanity-check the install / detect devices
+python main.py --gui              # launch the desktop app
+```
+
 **Requirements:** Python **3.10+**. Linux is the primary target; macOS and
 Windows work for the app and mock device (driver availability varies).
 
