@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SDR Hunter Drone Map</title>
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; background: #12151b; }
+    #map { height: 100%; width: 100%; }
+    .leaflet-container { background: #12151b; }
+    .rx-label { color:#33ffcc; font-weight:bold; text-shadow:0 0 3px #000; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script>
+    // Tile URL is templated by the Python host (offline-caching proxy).
+    var TILE_URL = "__TILE_URL__";
+    var map = L.map('map', { zoomControl: true }).setView([0, 0], 3);
+    L.tileLayer(TILE_URL, {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    var rxMarker = null;
+    var droneLayer = L.layerGroup().addTo(map);
+    var trackLayer = L.layerGroup().addTo(map);
+    var tracks = {};        // uid -> array of [lat, lon]
+    var clickToId = false;
+    var firstFix = false;
+
+    function colorFor(d) {
+      if (d.id_failed || d.alert) return '#ff4d4d';          // red: no RemoteID
+      if (d.source === 'remote_id' && d.active) return '#39ff88'; // green
+      return '#f5d76e';                                       // yellow: suspected
+    }
+
+    window.setRxStation = function(lat, lon) {
+      if (rxMarker) { map.removeLayer(rxMarker); }
+      rxMarker = L.circleMarker([lat, lon], {
+        radius: 9, color: '#33ffcc', fillColor: '#33ffcc', fillOpacity: 0.9
+      }).addTo(map).bindTooltip('RX Station', {
+        permanent: false, className: 'rx-label'
+      });
+      if (!firstFix) { map.setView([lat, lon], 13); firstFix = true; }
+    };
+
+    window.updateDrones = function(json) {
+      var drones = (typeof json === 'string') ? JSON.parse(json) : json;
+      droneLayer.clearLayers();
+      for (var i = 0; i < drones.length; i++) {
+        var d = drones[i];
+        if (d.lat == null || d.lon == null) continue;
+        var c = colorFor(d);
+        var m = L.circleMarker([d.lat, d.lon], {
+          radius: 8, color: c, fillColor: c, fillOpacity: 0.85, weight: 2
+        });
+        var popup = '<b>' + (d.callsign || d.uid || 'Drone') + '</b><br/>' +
+          'Source: ' + (d.source || '?') + '<br/>' +
+          (d.uas_id ? ('UAS ID: ' + d.uas_id + '<br/>') : '') +
+          (d.freq_hz ? ('Freq: ' + (d.freq_hz / 1e6).toFixed(3) + ' MHz<br/>') : '') +
+          'Conf: ' + ((d.confidence || 0)).toFixed(2) + '<br/>' +
+          'RemoteID: ' + (d.id_failed ? 'FAIL' : 'OK');
+        m.bindPopup(popup);
+        droneLayer.addLayer(m);
+        // Append to per-uid track.
+        var uid = d.uid || ('anon-' + i);
+        if (!tracks[uid]) tracks[uid] = [];
+        var last = tracks[uid][tracks[uid].length - 1];
+        if (!last || last[0] !== d.lat || last[1] !== d.lon) {
+          tracks[uid].push([d.lat, d.lon]);
+        }
+      }
+      redrawTracks();
+    };
+
+    function redrawTracks() {
+      trackLayer.clearLayers();
+      for (var uid in tracks) {
+        if (tracks[uid].length > 1) {
+          trackLayer.addLayer(L.polyline(tracks[uid], {
+            color: '#8ab4ff', weight: 2, opacity: 0.7, dashArray: '4,4'
+          }));
+        }
+      }
+    }
+
+    window.clearTracks = function() {
+      tracks = {};
+      trackLayer.clearLayers();
+    };
+
+    window.setClickToId = function(v) { clickToId = !!v; };
+
+    map.on('click', function(e) {
+      if (!clickToId) return;
+      // Signal the Python host via a hash change (robust, no QWebChannel dep).
+      window.location.hash = 'click/' + e.latlng.lat.toFixed(7) +
+                             '/' + e.latlng.lng.toFixed(7) + '/' + Date.now();
+    });
+  </script>
+</body>
+</html>

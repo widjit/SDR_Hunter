@@ -62,6 +62,11 @@ class ATAKSettings:
     unicast_host: str = ""
     unicast_port: int = 4242
     use_multicast: bool = True
+    callsign: str = "SDR-HUNTER"
+    stale_seconds: int = 120
+    send_drones: bool = True
+    send_signals: bool = False
+    send_anomalies: bool = False
 
 
 @dataclass

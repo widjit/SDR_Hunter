@@ -9,11 +9,16 @@
   const signalList = document.getElementById("signalList");
   const statusDot = document.getElementById("statusDot");
   const statusText = document.getElementById("statusText");
+  const wsSpecDot = document.getElementById("wsSpecDot");
+  const wsEvtDot = document.getElementById("wsEvtDot");
+  const droneList = document.getElementById("droneList");
+  const droneCount = document.getElementById("droneCount");
 
   let peakHold = null;
   let wfImage = null;
   const MAX_SIGNALS = 60;
   const signals = [];
+  const drones = new Map();  // uid -> drone dict
 
   function resizeCanvases() {
     for (const c of [wfCanvas, specCanvas]) {
@@ -122,15 +127,76 @@
     }
   }
 
+  // ---- drones -------------------------------------------------------
+  function droneClass(d) {
+    if (d.id_failed) return "drone";              // red — could not verify ID
+    if (d.source === "suspected" || (d.confidence != null && d.confidence < 0.5))
+      return "unknown";                           // yellow — suspected
+    return "known";                               // green — valid Remote ID
+  }
+
+  function upsertDrone(d) {
+    if (!d || !d.uid) return;
+    d._t = Date.now();
+    drones.set(d.uid, d);
+    renderDrones();
+  }
+
+  function renderDrones() {
+    // Drop entries not refreshed within 3 minutes.
+    const now = Date.now();
+    for (const [uid, d] of drones) {
+      if (d._t && now - d._t > 180000) drones.delete(uid);
+    }
+    droneCount.textContent = String(drones.size);
+    if (drones.size === 0) {
+      droneList.innerHTML = '<div class="empty">No drones detected.</div>';
+      return;
+    }
+    droneList.innerHTML = "";
+    const arr = Array.from(drones.values()).sort(
+      (a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+    for (const d of arr) {
+      const div = document.createElement("div");
+      div.className = "sig-item " + droneClass(d);
+      const id = d.callsign || d.uas_id || d.uid;
+      const pos = (d.lat != null && d.lon != null)
+        ? d.lat.toFixed(5) + ", " + d.lon.toFixed(5)
+        : "no position";
+      const alt = d.alt_m != null ? " · " + Math.round(d.alt_m) + " m" : "";
+      const freq = d.freq_hz ? " · " + (d.freq_hz / 1e6).toFixed(3) + " MHz" : "";
+      const conf = d.confidence != null
+        ? " · " + Math.round(d.confidence * 100) + "%" : "";
+      div.innerHTML =
+        '<div class="freq">' + id + "</div>" +
+        '<div class="meta">' + pos + alt + freq +
+        " · " + (d.source || "rf") + conf + "</div>";
+      droneList.appendChild(div);
+    }
+  }
+
+  async function pollDrones() {
+    try {
+      const r = await fetch("/api/drones");
+      const j = await r.json();
+      (j.drones || []).forEach(upsertDrone);
+      renderDrones();
+    } catch (e) { /* server may be busy; retry next tick */ }
+  }
+
   // ---- WebSockets ---------------------------------------------------
   function wsURL(path) {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     return proto + "://" + location.host + path;
   }
 
+  function setWsDot(dot, on) {
+    if (dot) dot.classList.toggle("on", on);
+  }
+
   function connectSpectrum() {
     const ws = new WebSocket(wsURL("/ws/spectrum"));
-    ws.onopen = () => ws.send("hello");
+    ws.onopen = () => { ws.send("hello"); setWsDot(wsSpecDot, true); };
     ws.onmessage = (ev) => {
       const frame = JSON.parse(ev.data);
       if (frame && frame.psd_db) {
@@ -138,18 +204,21 @@
         drawSpectrum(frame.psd_db);
       }
     };
-    ws.onclose = () => setTimeout(connectSpectrum, 1500);
+    ws.onclose = () => { setWsDot(wsSpecDot, false); setTimeout(connectSpectrum, 1500); };
+    ws.onerror = () => setWsDot(wsSpecDot, false);
   }
 
   function connectEvents() {
     const ws = new WebSocket(wsURL("/ws/events"));
-    ws.onopen = () => ws.send("hello");
+    ws.onopen = () => { ws.send("hello"); setWsDot(wsEvtDot, true); };
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
       if (!msg) return;
       addSignal(msg.kind, msg.data || {});
+      if (msg.kind === "drone") upsertDrone(msg.data || {});
     };
-    ws.onclose = () => setTimeout(connectEvents, 1500);
+    ws.onclose = () => { setWsDot(wsEvtDot, false); setTimeout(connectEvents, 1500); };
+    ws.onerror = () => setWsDot(wsEvtDot, false);
   }
 
   // ---- REST controls ------------------------------------------------
@@ -188,12 +257,30 @@
     statusText.textContent = on ? "scanning" : "idle";
   }
 
+  async function tuneFocus() {
+    const freq = parseFloat(document.getElementById("tuneFreq").value) * 1e6;
+    if (!isFinite(freq) || freq <= 0) return;
+    const btn = document.getElementById("tuneBtn");
+    const prev = btn.textContent;
+    btn.textContent = "…";
+    try {
+      await fetch("/api/tune", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ freq: freq }),
+      });
+    } catch (e) { console.error(e); }
+    btn.textContent = prev;
+  }
+
   document.getElementById("startBtn").addEventListener("click", startScan);
   document.getElementById("stopBtn").addEventListener("click", stopScan);
+  document.getElementById("tuneBtn").addEventListener("click", tuneFocus);
 
   // ---- init ---------------------------------------------------------
   resizeCanvases();
   loadDevices();
   connectSpectrum();
   connectEvents();
+  pollDrones();
+  setInterval(pollDrones, 3000);
 })();

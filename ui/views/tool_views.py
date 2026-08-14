@@ -138,6 +138,8 @@ class WeatherSatView(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self._apt = None          # last decoded APTImage
+        self._decoder = None      # lazily-created NOAAAPTDecoder
         root = QVBoxLayout(self)
 
         ctl = QHBoxLayout()
@@ -151,14 +153,37 @@ class WeatherSatView(QWidget):
         self.decode_btn = QPushButton("Start Decode")
         self.decode_btn.clicked.connect(self._emit_decode)
         ctl.addWidget(self.decode_btn)
+        self.load_btn = QPushButton("Load recording…")
+        self.load_btn.clicked.connect(self._load_recording)
+        ctl.addWidget(self.load_btn)
         ctl.addStretch(1)
         self.status = QLabel("Idle")
         self.status.setProperty("readout", "true")
         ctl.addWidget(self.status)
         root.addLayout(ctl)
 
-        self.image_label = QLabel("No image yet — decoded APT/LRPT lines "
-                                  "will appear here as they arrive.")
+        # Channel / colour selection + save.
+        ctl2 = QHBoxLayout()
+        ctl2.addWidget(QLabel("View:"))
+        self.channel = QComboBox()
+        self.channel.addItems(["Full frame", "Channel A", "Channel B",
+                               "False colour"])
+        self.channel.currentIndexChanged.connect(self._on_channel_changed)
+        ctl2.addWidget(self.channel)
+        self.save_btn = QPushButton("Save PNG…")
+        self.save_btn.clicked.connect(self._save_png)
+        ctl2.addWidget(self.save_btn)
+        ctl2.addStretch(1)
+        self.meteor_note = QLabel(
+            "METEOR-M2 LRPT image reconstruction is a documented future stage "
+            "(QPSK front-end only for now); APT decoding is fully supported.")
+        self.meteor_note.setWordWrap(True)
+        self.meteor_note.setStyleSheet("color:#8892a0;")
+        ctl2.addWidget(self.meteor_note, stretch=1)
+        root.addLayout(ctl2)
+
+        self.image_label = QLabel("No image yet — load an APT recording (WAV / "
+                                  "IQ) or arm a live decode.")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setMinimumHeight(360)
         self.image_label.setStyleSheet(
@@ -171,23 +196,141 @@ class WeatherSatView(QWidget):
         self.los = QLineEdit(); pf.addRow("LOS (UTC)", self.los)
         self.max_el = QDoubleSpinBox(); self.max_el.setRange(0, 90)
         self.max_el.setSuffix(" °"); pf.addRow("Max elevation", self.max_el)
+        self.predict_btn = QPushButton("Predict next pass (needs TLE)")
+        self.predict_btn.clicked.connect(self._predict_pass)
+        pf.addRow(self.predict_btn)
         root.addWidget(pass_box)
+
+    # ------------------------------------------------------------------
+    def _get_decoder(self):
+        if self._decoder is None:
+            from decoders.weather_sat.noaa_apt import NOAAAPTDecoder
+            self._decoder = NOAAAPTDecoder()
+        return self._decoder
 
     def _emit_decode(self) -> None:
         name = self.sat.currentText()
         self.status.setText(f"Decoding {name}…")
         self.decode_requested.emit(name, self.SATS[name])
 
-    def set_image(self, gray: np.ndarray) -> None:
-        """Display a decoded grayscale image (2D uint8/float array)."""
+    def _load_recording(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load APT recording", "",
+            "Audio / IQ (*.wav *.iq *.raw *.cf32);;All files (*)")
+        if not path:
+            return
         try:
-            arr = np.asarray(gray)
-            if arr.ndim != 2:
+            dec = self._get_decoder()
+            low = path.lower()
+            if low.endswith(".wav"):
+                audio, rate = self._read_wav(path)
+                self.status.setText("Decoding APT from WAV…")
+                self._apt = dec.decode_audio(audio, rate)
+            else:
+                rate, ok = QInputDialog.getDouble(
+                    self, "IQ sample rate",
+                    "Sample rate (Hz) of the IQ recording:", 2.048e6,
+                    8000, 60e6, 0)
+                if not ok:
+                    return
+                iq = np.fromfile(path, dtype=np.complex64)
+                self.status.setText("FM-demod + APT from IQ…")
+                self._apt = dec.decode_iq(iq, float(rate))
+            self._render_current()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Decode failed", str(exc))
+            self.status.setText("Decode failed")
+
+    @staticmethod
+    def _read_wav(path: str):
+        """Return (mono float audio, sample_rate) from a WAV file."""
+        import wave
+        with wave.open(path, "rb") as wf:
+            rate = wf.getframerate()
+            nch = wf.getnchannels()
+            width = wf.getsampwidth()
+            frames = wf.readframes(wf.getnframes())
+        dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(width, np.int16)
+        data = np.frombuffer(frames, dtype=dtype).astype(np.float64)
+        if nch > 1:
+            data = data.reshape(-1, nch).mean(axis=1)
+        peak = np.max(np.abs(data)) or 1.0
+        return data / peak, float(rate)
+
+    def _channel_key(self) -> str:
+        return {0: "full", 1: "a", 2: "b", 3: "false"}.get(
+            self.channel.currentIndex(), "full")
+
+    def _on_channel_changed(self, *_a) -> None:
+        self._render_current()
+
+    def _render_current(self) -> None:
+        if self._apt is None:
+            return
+        try:
+            arr = self._get_decoder().render(self._apt, self._channel_key())
+            if arr is not None:
+                self.set_image(arr)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _save_png(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        if self._apt is None:
+            QMessageBox.information(self, "Save PNG", "No decoded image yet.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save image", "apt.png", "PNG (*.png)")
+        if not path:
+            return
+        try:
+            out = self._get_decoder().save_png(self._apt, path,
+                                               self._channel_key())
+            if out:
+                QMessageBox.information(self, "Save PNG", f"Saved to {out}.")
+            else:
+                QMessageBox.warning(self, "Save PNG",
+                                    "Pillow is required to write PNGs.")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save PNG", str(exc))
+
+    def _predict_pass(self) -> None:
+        """Optional next-pass prediction via sgp4 (never blocks on network)."""
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            import sgp4  # noqa: F401
+        except Exception:  # noqa: BLE001
+            QMessageBox.information(
+                self, "Pass prediction",
+                "sgp4 is not installed. Install 'sgp4' and provide a current "
+                "TLE to enable automatic pass prediction. You can also enter "
+                "AOS/LOS manually above.")
+            return
+        QMessageBox.information(
+            self, "Pass prediction",
+            "sgp4 is available. Automatic prediction requires a current TLE "
+            "for the selected satellite; fetch one (e.g. from Celestrak) and "
+            "enter it, or use the manual AOS/LOS fields above.")
+
+    def set_image(self, image: np.ndarray) -> None:
+        """Display a decoded image (2D greyscale or 3D RGB uint8/float)."""
+        try:
+            arr = np.asarray(image)
+            if arr.ndim == 2:
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
+                h, w = arr.shape
+                qimg = QImage(arr.tobytes(), w, h, w,
+                              QImage.Format.Format_Grayscale8)
+            elif arr.ndim == 3 and arr.shape[2] == 3:
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
+                arr = np.ascontiguousarray(arr)
+                h, w = arr.shape[:2]
+                qimg = QImage(arr.tobytes(), w, h, 3 * w,
+                              QImage.Format.Format_RGB888)
+            else:
                 return
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
-            h, w = arr.shape
-            img = QImage(arr.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
-            self.image_label.setPixmap(QPixmap.fromImage(img).scaledToWidth(
+            self.image_label.setPixmap(QPixmap.fromImage(qimg).scaledToWidth(
                 min(900, self.image_label.width() or 800),
                 Qt.TransformationMode.SmoothTransformation))
             self.status.setText(f"Image {w}×{h}")

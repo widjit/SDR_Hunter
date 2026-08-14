@@ -9,7 +9,11 @@
 <body>
   <header>
     <h1>SDR&nbsp;HUNTER</h1>
-    <span><span id="statusDot" class="status-dot"></span><span id="statusText">idle</span></span>
+    <span class="conn-group">
+      <span><span id="statusDot" class="status-dot"></span><span id="statusText">idle</span></span>
+      <span class="ws-badge"><span id="wsSpecDot" class="status-dot"></span>spectrum</span>
+      <span class="ws-badge"><span id="wsEvtDot" class="status-dot"></span>events</span>
+    </span>
 
     <label>Device</label>
     <select id="deviceSel"><option>loading…</option></select>
@@ -29,6 +33,16 @@
 
     <button id="startBtn" class="primary">Start Scan</button>
     <button id="stopBtn" class="stop">Stop</button>
+
+    <span class="tune-group">
+      <label>Tune</label>
+      <select id="tuneRx">
+        <option value="0">RX1</option>
+        <option value="1">RX2</option>
+      </select>
+      <input id="tuneFreq" type="number" value="100.0" step="0.1" title="Frequency (MHz)" />
+      <button id="tuneBtn">Focus</button>
+    </span>
   </header>
 
   <main>
@@ -55,6 +69,16 @@
         </div>
       </div>
       <div id="signalList"></div>
+
+      <div class="panel" style="margin-top:14px;">
+        <h2>Active Drones <span id="droneCount" class="legend">0</span></h2>
+        <div class="legend">
+          <span class="tag known">Remote&nbsp;ID</span>
+          <span class="tag unknown">suspected</span>
+          <span class="tag drone">ID&nbsp;failed</span>
+        </div>
+      </div>
+      <div id="droneList"><div class="empty">No drones detected.</div></div>
     </div>
   </main>
 

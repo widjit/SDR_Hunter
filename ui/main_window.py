@@ -19,7 +19,7 @@ from typing import Dict, Optional
 
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog,
                              QInputDialog, QLabel, QMainWindow, QMessageBox,
                              QPushButton, QSplitter, QStackedWidget, QStatusBar,
@@ -29,6 +29,7 @@ from atak.atak_bridge import ATAKBridge
 from config import settings as settings_mod
 
 from .app_state import AppState
+from .dialogs.atak_dialog import ATAKConfigDialog
 from .dialogs.baseline_dialog import (BaselineManagerDialog,
                                        CaptureBaselineDialog)
 from .dialogs.bookmark_dialog import BookmarkDialog
@@ -86,6 +87,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_statusbar()
         self._connect_signals()
+        self._build_shortcuts()
 
         self.tiles.apply_preset("Standard")
 
@@ -230,10 +232,11 @@ class MainWindow(QMainWindow):
                   lambda: self._goto_tab("Audio Decoder"))
         self._act(m_tools, "Weather Satellite",
                   lambda: self._goto_tab("Weather Satellite"))
-        self._act(m_tools, "ATAK Config", self._open_settings)
+        self._act(m_tools, "ATAK Config", self._open_atak_config)
 
         m_help = mb.addMenu("&Help")
         self._act(m_help, "About", self._about)
+        self._act(m_help, "Keyboard Shortcuts", self._show_shortcuts)
         self._act(m_help, "Check for Updates",
                   lambda: QMessageBox.information(
                       self, "Updates", "You are running the latest build."))
@@ -364,7 +367,7 @@ class MainWindow(QMainWindow):
         self.atak_panel.enable_toggled.connect(self._on_atak_enable)
         self.atak_panel.send_selected_requested.connect(
             self._send_selected_signal_atak)
-        self.atak_panel.config_requested.connect(self._open_settings)
+        self.atak_panel.config_requested.connect(self._open_atak_config)
 
         # Drone panel + view.
         self.drone_panel.open_tab_requested.connect(
@@ -987,8 +990,114 @@ class MainWindow(QMainWindow):
         self.signals.notify_devices(devices)
 
     # ==================================================================
-    # Settings
+    # Keyboard shortcuts / ATAK config / Settings
     # ==================================================================
+    def _build_shortcuts(self) -> None:
+        """Wire application-wide keyboard shortcuts.
+
+        Every binding is guarded so a missing widget/slot can never prevent
+        the window from constructing. Bindings mirror the documented table in
+        the Help ▸ Keyboard Shortcuts dialog and QUICKSTART.md.
+        """
+        bindings = [
+            ("F1", lambda: self._goto_tab("Main")),
+            ("F2", lambda: self._goto_tab("Spectrum Hunting")),
+            ("F3", lambda: self._goto_tab("Drone Tracking")),
+            ("F4", self._open_dual_signal_view),
+            ("Space", self._toggle_scan_shortcut),
+            ("R", self._toggle_record_shortcut),
+            ("Ctrl+T", self._tune_rx1_dialog),
+            ("Ctrl+B", self._bookmark_current),
+            ("Ctrl+L", self._open_baseline_manager),
+            ("Escape", self._cancel_op),
+        ]
+        self._shortcuts = []
+        for key, slot in bindings:
+            try:
+                sc = QShortcut(QKeySequence(key), self)
+                sc.activated.connect(slot)
+                self._shortcuts.append(sc)
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to bind shortcut %s", key)
+
+    def _toggle_scan_shortcut(self) -> None:
+        try:
+            self.start_btn.setChecked(not self.start_btn.isChecked())
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _toggle_record_shortcut(self) -> None:
+        try:
+            self.record_btn.setChecked(not self.record_btn.isChecked())
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _tune_rx1_dialog(self) -> None:
+        try:
+            current = self.rx1_freq.value()
+            freq_mhz, ok = QInputDialog.getDouble(
+                self, "Tune RX1", "Frequency (MHz):", current,
+                0.1, 6000.0, 4)
+            if ok:
+                self._tune(1, freq_mhz * 1e6)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Tune RX1", str(exc))
+
+    def _bookmark_current(self) -> None:
+        try:
+            freq_hz = self.rx1_freq.value() * 1e6
+            self.state.bookmark_manager.add(
+                freq_hz=freq_hz,
+                name=f"RX1 {freq_hz/1e6:.4f} MHz",
+                modulation="", bandwidth_hz=0.0, category="Quick")
+            self.signals.notify_status(
+                f"Bookmarked {freq_hz/1e6:.4f} MHz")
+            if self._bookmark_dialog is not None:
+                self._bookmark_dialog._refresh_folders()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Bookmark", str(exc))
+
+    def _cancel_op(self) -> None:
+        """Escape: stop scanning if running, else return to the Main tab."""
+        try:
+            if self.state.scanning:
+                self.start_btn.setChecked(False)
+            else:
+                self._goto_tab("Main")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _show_shortcuts(self) -> None:
+        QMessageBox.information(
+            self, "Keyboard Shortcuts",
+            "<h3>Keyboard Shortcuts</h3>"
+            "<table cellpadding='4'>"
+            "<tr><td><b>F1</b></td><td>Standard (Main) view</td></tr>"
+            "<tr><td><b>F2</b></td><td>Spectrum Hunting view</td></tr>"
+            "<tr><td><b>F3</b></td><td>Drone Tracking view</td></tr>"
+            "<tr><td><b>F4</b></td><td>Dual Signal Analysis</td></tr>"
+            "<tr><td><b>Space</b></td><td>Start / Stop scanning</td></tr>"
+            "<tr><td><b>R</b></td><td>Start / Stop recording</td></tr>"
+            "<tr><td><b>Ctrl+T</b></td><td>Tune RX1 (enter frequency)</td></tr>"
+            "<tr><td><b>Ctrl+B</b></td><td>Bookmark current RX1 frequency</td></tr>"
+            "<tr><td><b>Ctrl+L</b></td><td>Load / manage baselines</td></tr>"
+            "<tr><td><b>Esc</b></td><td>Cancel scan / return to Main</td></tr>"
+            "</table>")
+
+    def _open_atak_config(self) -> None:
+        dlg = ATAKConfigDialog(self.state.settings, self)
+        if dlg.exec():
+            # Rebuild the ATAK bridge from the (possibly changed) settings and
+            # sync the enabled state into the status panel.
+            try:
+                self.atak = ATAKBridge.from_settings(self.state.settings.atak)
+                self.atak.enabled = bool(self.state.settings.atak.enabled)
+                if hasattr(self.atak_panel, "set_enabled_state"):
+                    self.atak_panel.set_enabled_state(self.atak.enabled)
+                self.signals.notify_status("ATAK configuration updated")
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to apply ATAK config")
+
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.state.settings, self._extras, self)
         if dlg.exec():
