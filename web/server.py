@@ -108,11 +108,20 @@ def create_app(app_state: Optional[Any] = None) -> "FastAPI":
 
     @app.post("/api/tune")
     async def tune(payload: Dict[str, Any]) -> Any:
-        state.tune_focus(
-            freq=float(payload["freq"]),
+        # ``rx`` uses the engine's 0-indexed channels, matching the web UI
+        # selector (0 -> RX1/scanner, 1 -> RX2/focus). Invalid values fall
+        # back to RX1 (0) inside the engine dispatcher.
+        try:
+            rx = int(payload.get("rx", 0))
+        except (TypeError, ValueError):
+            rx = 0
+        freq = float(payload["freq"])
+        tuned_rx = state.tune_focus(
+            freq=freq,
             bandwidth=payload.get("bandwidth"),
-            duration_s=payload.get("duration_s"))
-        return {"tuned": payload["freq"]}
+            duration_s=payload.get("duration_s"),
+            rx=rx)
+        return {"tuned": freq, "rx": tuned_rx}
 
     @app.get("/api/status")
     async def status() -> Any:
@@ -171,7 +180,7 @@ def create_app(app_state: Optional[Any] = None) -> "FastAPI":
 
 def run(host: Optional[str] = None, port: Optional[int] = None,
         app_state: Optional[Any] = None) -> None:
-    """Run the web server with uvicorn."""
+    """Run the web server with uvicorn (blocking; used by ``main.py --web``)."""
     import uvicorn  # local import
 
     from ui.app_state import AppState
@@ -180,6 +189,82 @@ def run(host: Optional[str] = None, port: Optional[int] = None,
     host = host or state.settings.web.host
     port = port or state.settings.web.port
     uvicorn.run(app, host=host, port=port)
+
+
+class WebServerController:
+    """Start/stop the FastAPI web server in a background thread at runtime.
+
+    ``uvicorn.run()`` blocks and cannot be stopped, so this wraps a
+    :class:`uvicorn.Server` instance whose ``.should_exit`` flag is toggled to
+    shut it down gracefully. Nothing here imports Qt or requires a display, so
+    it is safe to construct and use headless. All heavy imports (uvicorn,
+    FastAPI app creation) happen lazily inside :meth:`start`.
+    """
+
+    def __init__(self, app_state: Optional[Any] = None,
+                 host: Optional[str] = None, port: Optional[int] = None):
+        self._app_state = app_state
+        self._host = host
+        self._port = port
+        self._server: Optional[Any] = None   # uvicorn.Server
+        self._thread: Optional[Any] = None    # threading.Thread
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self._thread is not None and self._thread.is_alive()
+                    and self._server is not None
+                    and not getattr(self._server, "should_exit", False))
+
+    @property
+    def url(self) -> str:
+        host = self._host or "0.0.0.0"
+        # Present loopback for the wildcard bind so the URL is clickable.
+        shown = "127.0.0.1" if host in ("0.0.0.0", "") else host
+        return f"http://{shown}:{self._port or 8000}"
+
+    def start(self) -> None:
+        """Start the server in a daemon thread. No-op if already running.
+
+        Raises on misconfiguration (e.g. missing deps); callers should guard.
+        """
+        if self.is_running:
+            return
+        import threading
+        import uvicorn  # local import; optional heavy dep
+
+        from ui.app_state import AppState
+        state = self._app_state or AppState()
+        self._app_state = state
+        self._host = self._host or state.settings.web.host
+        self._port = self._port or state.settings.web.port
+
+        app = create_app(state)
+        cfg = uvicorn.Config(app, host=self._host, port=self._port,
+                             log_level="warning")
+        self._server = uvicorn.Server(cfg)
+
+        def _serve() -> None:
+            try:
+                self._server.run()
+            except Exception:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).exception("web server crashed")
+
+        self._thread = threading.Thread(target=_serve, daemon=True,
+                                        name="WebServer")
+        self._thread.start()
+
+    def stop(self, timeout: float = 3.0) -> None:
+        """Signal the server to exit and wait briefly for the thread to end."""
+        if self._server is not None:
+            self._server.should_exit = True
+        if self._thread is not None:
+            try:
+                self._thread.join(timeout=timeout)
+            except Exception:  # noqa: BLE001
+                pass
+        self._server = None
+        self._thread = None
 
 
 # Allow ``uvicorn sdr_hunter.web.server:app`` usage.

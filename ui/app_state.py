@@ -182,8 +182,16 @@ class AppState:
         self.scanning = False
 
     def tune_focus(self, freq: float, bandwidth: Optional[float] = None,
-                   duration_s: Optional[float] = None) -> None:
-        self.engine.focus_rx1(freq, bandwidth, duration_s)
+                   duration_s: Optional[float] = None,
+                   rx: int = 1) -> int:
+        """Tune a receiver to ``freq``.
+
+        ``rx`` selects the receiver using the engine's 0-indexed channels
+        (``0`` -> RX1/scanner, ``1`` -> RX2/focus). Defaults to ``1`` (focus)
+        to preserve the historical single-argument behaviour of this method.
+        Returns the receiver actually tuned.
+        """
+        return self.engine.tune(rx, freq, bandwidth, duration_s)
 
     def get_latest_spectrum(self, channel: int = 0) -> Optional[Dict[str, Any]]:
         with self._lock:

@@ -111,6 +111,9 @@ class DualRXEngine:
         self._pending_seen: set = set()   # freq keys already queued
         self.dual_signal_mode = False     # both RX parked for comparison
         self._park_center: Optional[float] = None  # RX0 park freq in dual mode
+        # RX0 (scanner) manual park frequency set via a remote/manual tune.
+        # When not None the scanner stops hopping and stays on this frequency.
+        self._scanner_park_freq: Optional[float] = None
 
         self._worker: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
@@ -244,6 +247,54 @@ class DualRXEngine:
             self._focus_freq = None
             self._focus_until = None
 
+    def tune_scanner(self, freq: float, bandwidth: Optional[float] = None) -> None:
+        """Park the RX0 scanner on ``freq`` (stops sweeping until released).
+
+        This is the RX0/RX1 (UI "RX1") counterpart to :meth:`focus_rx1`. The
+        scanner keeps producing spectra/detections on the parked frequency
+        instead of hopping across the plan. Safe when no device is open yet:
+        the frequency is stored and applied on the next scan step.
+        """
+        with self._lock:
+            self._scanner_park_freq = freq
+            if bandwidth:
+                self.scanner_cfg.bandwidth = bandwidth
+            if self.scanner_dev is not None:
+                try:
+                    self.scanner_dev.set_frequency(self._scanner_channel, freq)
+                    if bandwidth:
+                        self.scanner_dev.set_bandwidth(self._scanner_channel,
+                                                       bandwidth)
+                except Exception:  # noqa: BLE001
+                    logger.debug("tune_scanner: device retune failed",
+                                 exc_info=True)
+
+    def release_scanner_park(self) -> None:
+        """Release the RX0 scanner park so the sweep resumes."""
+        with self._lock:
+            self._scanner_park_freq = None
+
+    def tune(self, rx: int, freq: float, bandwidth: Optional[float] = None,
+             duration_s: Optional[float] = None) -> int:
+        """Route a tune command to the selected receiver.
+
+        ``rx`` uses the engine's 0-indexed channels (matching the web UI:
+        ``0`` -> RX1/scanner, ``1`` -> RX2/focus). Any out-of-range value
+        falls back to ``0`` (RX1). Returns the receiver actually tuned.
+        """
+        try:
+            rx = int(rx)
+        except (TypeError, ValueError):
+            rx = 0
+        if rx not in (0, 1):
+            rx = 0
+        if rx == 1:
+            self.focus_rx1(freq, bandwidth=bandwidth, duration_s=duration_s,
+                           manual=True)
+        else:
+            self.tune_scanner(freq, bandwidth=bandwidth)
+        return rx
+
     # ------------------------------------------------------------------
     # Pending identification queue
     # ------------------------------------------------------------------
@@ -356,9 +407,12 @@ class DualRXEngine:
                 time.sleep(0.1)
 
     def _scan_step(self, cfg: RXConfig) -> None:
-        center = (self._park_center if (self.dual_signal_mode
-                  and self._park_center is not None)
-                  else self.scheduler.current_center)
+        if self.dual_signal_mode and self._park_center is not None:
+            center = self._park_center
+        elif self._scanner_park_freq is not None:
+            center = self._scanner_park_freq
+        else:
+            center = self.scheduler.current_center
         if center is None or self.scanner_dev is None:
             time.sleep(0.05)
             return
@@ -383,7 +437,8 @@ class DualRXEngine:
                         and not self._manual_focus
                         and not self.dual_signal_mode):
                     self.auto_record_unknown(ev)
-        if not self.dual_signal_mode and self.scheduler.should_hop():
+        if (not self.dual_signal_mode and self._scanner_park_freq is None
+                and self.scheduler.should_hop()):
             self.scheduler.next_center()
 
     def _focus_step(self) -> None:

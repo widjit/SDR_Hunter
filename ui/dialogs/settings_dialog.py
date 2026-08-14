@@ -141,6 +141,9 @@ class SettingsDialog(QDialog):
 
     def _build_web(self) -> None:
         f = self._page("Web Server")
+        self.web_enabled = QCheckBox("Enable web dashboard")
+        self.web_enabled.setChecked(bool(self._settings.web.enabled))
+        f.addRow(self.web_enabled)
         self.web_port = QSpinBox()
         self.web_port.setRange(1, 65535)
         self.web_port.setValue(self._settings.web.port)
@@ -199,6 +202,7 @@ class SettingsDialog(QDialog):
         s.sdr.fft_size = int(self.fft_size.currentText())
         s.sdr.auto_record_seconds = self.auto_dur.value()
         s.recordings_dir = self.rec_path.text()
+        s.web.enabled = self.web_enabled.isChecked()
         s.web.port = self.web_port.value()
         s.web.host = self.web_host.text()
         s.atak.multicast_group = self.atak_mcast.text()

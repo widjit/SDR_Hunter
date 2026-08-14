@@ -46,6 +46,7 @@ class SDRSettings:
 class WebSettings:
     """Web server settings."""
 
+    enabled: bool = True  # whether the web dashboard is enabled/started
     host: str = "0.0.0.0"
     port: int = 8000
     enable_cors: bool = True

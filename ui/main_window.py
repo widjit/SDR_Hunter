@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 from typing import Dict, Optional
 
 import numpy as np
@@ -64,8 +63,9 @@ class MainWindow(QMainWindow):
         self.state = app_state or AppState()
         self.signals = AppSignals(self.state)
         self.docks: Dict[str, QDockWidget] = {}
-        self._web_thread: Optional[threading.Thread] = None
-        self._web_server = None
+        self._web_ctrl = None          # web.server.WebServerController (lazy)
+        self._web_action: Optional[QAction] = None
+        self._web_sync = False         # reentrancy guard for toggle syncing
         self._baseline_dialog: Optional[BaselineManagerDialog] = None
         self._dual_signal_view: Optional[DualSignalView] = None
         self._bookmark_dialog: Optional[BookmarkDialog] = None
@@ -97,8 +97,11 @@ class MainWindow(QMainWindow):
         self._timer.start(1000)
 
         self._refresh_devices()
-        if embed_web:
-            self._toggle_web(True)
+        # Initialize the web-dashboard toggle from the persisted setting.
+        # ``embed_web`` (--both) forces it on regardless. Setting the checked
+        # state fires the toggle handler, which starts the server if enabled.
+        want_web = bool(embed_web or self.state.settings.web.enabled)
+        self._set_web_toggle_checked(want_web)
 
     # ==================================================================
     # Construction
@@ -200,6 +203,14 @@ class MainWindow(QMainWindow):
             act = dock.toggleViewAction()
             self.m_view.addAction(act)
         self.m_view.addSeparator()
+        # Checkable live toggle for the web dashboard. Initial checked state is
+        # applied later from the persisted ``web.enabled`` setting (in __init__).
+        # No shortcut assigned — avoids clashing with F1-F4 / Space / R.
+        self._web_action = QAction("Enable Web Dashboard", self)
+        self._web_action.setCheckable(True)
+        self._web_action.toggled.connect(self._on_web_action_toggled)
+        self.m_view.addAction(self._web_action)
+        self.m_view.addSeparator()
         self._act(self.m_view, "Reset Layout",
                   lambda: self.tiles.apply_preset("Standard"))
         self._act(self.m_view, "Spectrum Hunting View",
@@ -299,7 +310,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         self.web_btn = QPushButton("🌐 Web Server")
         self.web_btn.setCheckable(True)
-        self.web_btn.toggled.connect(self._toggle_web)
+        self.web_btn.toggled.connect(self._on_web_btn_toggled)
         tb.addWidget(self.web_btn)
 
     def _build_statusbar(self) -> None:
@@ -1108,53 +1119,94 @@ class MainWindow(QMainWindow):
                 self.signals.notify_status("Settings saved")
             except Exception:  # noqa: BLE001
                 pass
+            # Reconcile the live web dashboard with the (possibly changed)
+            # persisted ``web.enabled`` preference from the dialog.
+            desired = bool(self.state.settings.web.enabled)
+            running = self._web_ctrl is not None and self._web_ctrl.is_running
+            if desired != running:
+                self._apply_web_toggle(desired, persist=False)
 
     # ==================================================================
     # Web server (embedded)
     # ==================================================================
-    def _toggle_web(self, on: bool) -> None:
-        if on:
-            self._start_web()
-        else:
-            self._stop_web()
+    def _on_web_btn_toggled(self, on: bool) -> None:
+        """Toolbar 🌐 button toggled by the user."""
+        self._apply_web_toggle(on, persist=True)
 
-    def _start_web(self) -> None:
+    def _on_web_action_toggled(self, on: bool) -> None:
+        """View → Enable Web Dashboard menu item toggled by the user."""
+        self._apply_web_toggle(on, persist=True)
+
+    def _set_web_toggle_checked(self, on: bool) -> None:
+        """Set the toggle state at startup from the persisted setting.
+
+        Applies the start/stop without re-persisting the setting.
+        """
+        self._apply_web_toggle(on, persist=False)
+
+    def _sync_web_widgets(self, on: bool) -> None:
+        """Reflect ``on`` on both the toolbar button and the menu action."""
+        for w in (getattr(self, "web_btn", None), self._web_action):
+            if w is None:
+                continue
+            w.blockSignals(True)
+            w.setChecked(on)
+            w.blockSignals(False)
+
+    def _apply_web_toggle(self, on: bool, persist: bool) -> None:
+        """Start/stop the web server and keep both toggles + setting in sync.
+
+        Guarded so it never crashes: dependency/port errors surface a
+        non-fatal message and the toggle reverts to off.
+        """
+        if self._web_sync:
+            return
+        self._web_sync = True
         try:
-            import uvicorn
-            from web import server as web_server
+            if on:
+                started = self._start_web()
+                on = started  # may have failed to start
+            else:
+                self._stop_web()
+            self._sync_web_widgets(on)
+            if persist:
+                self.state.settings.web.enabled = on
+                try:
+                    self.state.settings.save()
+                except Exception:  # noqa: BLE001
+                    logger.debug("failed to persist web.enabled", exc_info=True)
+        finally:
+            self._web_sync = False
+
+    def _start_web(self) -> bool:
+        """Start the embedded web server. Returns True on success."""
+        try:
+            from web.server import WebServerController
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Web server",
                                 f"Web dependencies unavailable: {exc}")
-            self.web_btn.setChecked(False)
-            return
+            return False
         try:
-            app = web_server.create_app(self.state)
-            cfg = uvicorn.Config(
-                app, host=self.state.settings.web.host,
-                port=self.state.settings.web.port, log_level="warning")
-            self._web_server = uvicorn.Server(cfg)
-
-            def _serve():
-                try:
-                    self._web_server.run()
-                except Exception:  # noqa: BLE001
-                    logger.exception("web server crashed")
-
-            self._web_thread = threading.Thread(target=_serve, daemon=True,
-                                                 name="WebServer")
-            self._web_thread.start()
-            url = f"http://{self.state.settings.web.host}:{self.state.settings.web.port}"
-            self.signals.notify_status(f"Web server started at {url}")
+            if self._web_ctrl is None:
+                self._web_ctrl = WebServerController(self.state)
+            if self._web_ctrl.is_running:
+                return True
+            self._web_ctrl.start()
+            self.signals.notify_status(
+                f"Web dashboard started at {self._web_ctrl.url}")
+            return True
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Web server", str(exc))
-            self.web_btn.setChecked(False)
+            QMessageBox.warning(self, "Web server",
+                                f"Could not start web dashboard: {exc}")
+            return False
 
     def _stop_web(self) -> None:
-        if self._web_server is not None:
-            self._web_server.should_exit = True
-            self.signals.notify_status("Web server stopping…")
-            self._web_server = None
-            self._web_thread = None
+        if self._web_ctrl is not None:
+            try:
+                self._web_ctrl.stop()
+            except Exception:  # noqa: BLE001
+                logger.debug("web server stop failed", exc_info=True)
+        self.signals.notify_status("Web dashboard stopped")
 
     # ==================================================================
     # Sessions

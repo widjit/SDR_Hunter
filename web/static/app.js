@@ -260,13 +260,21 @@
   async function tuneFocus() {
     const freq = parseFloat(document.getElementById("tuneFreq").value) * 1e6;
     if (!isFinite(freq) || freq <= 0) return;
+    // rx selector: 0 -> RX1/scanner, 1 -> RX2/focus (engine 0-indexed).
+    const rx = parseInt(document.getElementById("tuneRx").value, 10) || 0;
+    // Bandwidth in MHz -> Hz. Engine expects Hz (defaults like 2.0e6).
+    // Omit the field when blank/invalid so we never POST NaN; the backend
+    // then leaves the receiver's current bandwidth unchanged.
+    const bwMhz = parseFloat(document.getElementById("tuneBw").value);
+    const payload = { freq: freq, rx: rx };
+    if (isFinite(bwMhz) && bwMhz > 0) payload.bandwidth = bwMhz * 1e6;
     const btn = document.getElementById("tuneBtn");
     const prev = btn.textContent;
     btn.textContent = "…";
     try {
       await fetch("/api/tune", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ freq: freq }),
+        body: JSON.stringify(payload),
       });
     } catch (e) { console.error(e); }
     btn.textContent = prev;
