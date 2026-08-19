@@ -1,0 +1,42 @@
+# SDR Hunter — web-mode-only Python dependencies
+#
+# This is the trimmed dependency set used by the headless web server
+# (``python main.py --web``) and the Docker image (see Dockerfile / DOCKER.md).
+# It deliberately OMITS the desktop Qt stack (PyQt6, pyqtgraph) and the local
+# audio-output libraries (sounddevice, PyAudio) — none of which are needed by
+# the ``--web`` code path, and which would only bloat a headless server image.
+#
+# SoapySDR Python bindings are provided by the system packages (installed via
+# apt in the Docker image), NOT pip. The app falls back to a synthetic mock
+# device when SoapySDR / hardware is absent (SDRHUNTER_FORCE_MOCK=1).
+#
+# For the full desktop experience use requirements.txt instead.
+
+# --- Core numerics / DSP ---
+numpy>=1.24
+scipy>=1.10
+
+# --- Web server / remote UI ---
+fastapi>=0.110
+uvicorn[standard]>=0.27
+websockets>=12.0
+aiofiles>=23.0
+httpx>=0.26
+aiohttp>=3.9
+requests>=2.31
+
+# --- Data / persistence ---
+SQLAlchemy>=2.0
+
+# --- IQ recording format ---
+sigmf>=1.1
+
+# --- Mapping / imaging (used by recording/analysis helpers) ---
+folium>=0.15
+Pillow>=10.0
+matplotlib>=3.7
+
+# --- Protocol decoding helpers ---
+construct>=2.10
+crcmod>=1.7
+bitarray>=2.9

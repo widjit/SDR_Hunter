@@ -1,0 +1,38 @@
+# SDR Hunter — web-mode-only stack.
+#
+#   docker compose up --build      # build + run, dashboard on http://localhost:8000
+#   docker compose down            # stop & remove
+#
+# By default the app runs in synthetic MOCK mode (no hardware needed). To use a
+# real USB SDR on a LINUX host, set SDRHUNTER_FORCE_MOCK=0 and uncomment the
+# `devices:` / `privileged:` block below (does NOT work on Docker Desktop for
+# Mac/Windows — see DOCKER.md).
+
+services:
+  sdr-hunter-web:
+    build: .
+    image: sdr-hunter-web
+    container_name: sdr-hunter-web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Set to 0 to use a real SDR (requires USB passthrough below, Linux only).
+      SDRHUNTER_FORCE_MOCK: "1"
+    volumes:
+      # Persist config, recordings, baselines and the SQLite DB across restarts.
+      - sdrhunter_data:/home/appuser/.sdr_hunter
+
+    # --- Real USB SDR passthrough (LINUX HOSTS ONLY) -----------------------
+    # Uncomment to expose host USB SDRs to the container. You must also set
+    # SDRHUNTER_FORCE_MOCK=0 above. On Linux you additionally need working host
+    # udev rules for your SDR (see install_drivers.sh). This does NOT work on
+    # Docker Desktop for Mac/Windows — there is no USB passthrough on those.
+    #
+    # devices:
+    #   - /dev/bus/usb:/dev/bus/usb
+    # # Some drivers need broader access; privileged is the simplest catch-all:
+    # privileged: true
+
+volumes:
+  sdrhunter_data:

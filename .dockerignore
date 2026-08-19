@@ -1,0 +1,42 @@
+# Keep the Docker build context small.
+
+# Version control / CI
+.git
+.gitignore
+.github
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Runtime data / recordings (never bake into the image)
+data/
+recordings/
+baselines/
+*.db
+*.sigmf-data
+*.sigmf-meta
+
+# Generated docs (not needed at runtime; large binaries)
+*.pdf
+*.docx
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Internal
+.abacus.donotdelete
