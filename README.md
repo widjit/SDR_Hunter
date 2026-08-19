@@ -109,8 +109,8 @@ so any SoapySDR-supported device works. Tested / targeted devices:
 ### 1. Python dependencies
 
 ```bash
-git clone https://github.com/<your-org>/sdr-hunter.git
-cd sdr-hunter
+git clone https://github.com/widjit/SDR_Hunter.git
+cd SDR_Hunter
 pip install -r requirements.txt
 ```
 
