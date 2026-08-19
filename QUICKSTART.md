@@ -9,6 +9,36 @@ pip install -r requirements.txt
 ./install_drivers.sh
 ```
 
+### Arch / CachyOS
+Arch-based distros (including **CachyOS**) differ in two ways: they enforce
+**PEP 668** (a system-wide `pip install` is blocked, so you must use a venv), and
+CachyOS defaults to the **fish** shell (the usual `activate` script won't work).
+`./install_drivers.sh` handles this automatically, but the manual steps are:
+
+```bash
+# 1. System packages (note the Arch names: libuhd, python-pyqt6-webengine, portaudio)
+sudo pacman -S --needed soapysdr soapyrtlsdr soapyhackrf soapybladerf soapyuhd libuhd \
+  rtl-sdr hackrf libusb portaudio python-pyqt6 python-pyqt6-webengine
+
+# 2. Create a venv WITH --system-site-packages (so it can see the pacman SoapySDR/PyQt6 bindings)
+python -m venv --system-site-packages .venv
+
+# 3. Activate it — the command depends on your shell:
+source .venv/bin/activate          # bash / zsh
+source .venv/bin/activate.fish     # fish (CachyOS default)
+#   ...or skip activation and call .venv/bin/python directly.
+
+# 4. Install the Python deps
+pip install -r requirements.txt
+```
+
+> Seeing `'case' builtin not inside of switch block`? You're in **fish** but sourced
+> the bash `activate` script — use `activate.fish` instead.
+> Do **not** use `pip install --break-system-packages`; use the venv above.
+>
+> LimeSDR / PlutoSDR / SDRplay / Airspy Soapy modules are AUR-only, e.g.
+> `paru -S soapylms7 soapysdrplay3 soapyairspy limesuite` (optional).
+
 ## 2. Run
 ```bash
 ./launch.sh                 # desktop GUI (same as: python3 main.py --gui)

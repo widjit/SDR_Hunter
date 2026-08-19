@@ -57,10 +57,18 @@ install_fedora() {
 
 install_arch() {
   log "Installing SoapySDR + drivers via pacman (sudo required)…"
-  sudo pacman -Sy --noconfirm \
-    soapysdr soapyrtlsdr soapyhackrf soapybladerf soapyuhd \
-    rtl-sdr hackrf uhd libusb python-pip || warn "Some pacman packages failed."
-  warn "LimeSDR/Pluto/SDRplay/Airspy Soapy modules may be in AUR."
+  # Arch/CachyOS package names differ from Debian:
+  #   uhd            -> libuhd                    (USRP host libs; Soapy module is soapyuhd)
+  #   pyqt6-webengine-> python-pyqt6-webengine    (optional; powers the in-app map)
+  #   portaudio      MUST be present before pip builds PyAudio
+  sudo pacman -S --needed --noconfirm \
+    soapysdr soapyrtlsdr soapyhackrf soapybladerf soapyuhd libuhd \
+    rtl-sdr hackrf libusb portaudio \
+    python-pyqt6 python-pyqt6-webengine || warn "Some pacman packages failed; continuing."
+  warn "LimeSDR / PlutoSDR / SDRplay / Airspy Soapy modules are AUR-only (not in the"
+  warn "official repos). Optional — if you use an AUR helper such as paru or yay:"
+  warn "    paru -S soapylms7 soapysdrplay3 soapyairspy limesuite"
+  warn "(exact AUR names vary; safe to skip if you don't have those SDRs)."
 }
 
 install_macos() {
@@ -98,12 +106,54 @@ RULES
   ok "udev rules installed at $rules"
 }
 
+print_venv_activation_hint() {
+  local venv_dir="$1"
+  echo
+  ok "Python deps installed into virtualenv: $venv_dir"
+  log "Activate it before running SDR Hunter — the command depends on your shell:"
+  printf '    # bash / zsh:\n'
+  printf '    source %s/bin/activate\n' "$venv_dir"
+  printf '    # fish (CachyOS default shell):\n'
+  printf '    source %s/bin/activate.fish\n' "$venv_dir"
+  printf '    # ...or skip activation and call the venv Python directly:\n'
+  printf '    %s/bin/python main.py --gui\n' "$venv_dir"
+  warn "Seeing \"'case' builtin not inside of switch block\"? You are in fish but sourced"
+  warn "the bash 'activate' script — use 'activate.fish' instead."
+  warn "Do NOT use 'pip install --break-system-packages'; use this virtualenv instead."
+}
+
 install_python_deps() {
+  local os="${1:-unknown}"
+  local reqs; reqs="$(dirname "$0")/requirements.txt"
+
+  if [[ "$os" == "arch" ]]; then
+    # Arch/CachyOS enforce PEP 668: a system-wide `pip install` is blocked. Use a venv.
+    log "Arch/CachyOS enforce PEP 668 — installing Python deps into a virtualenv…"
+    local venv_dir; venv_dir="$(dirname "$0")/.venv"
+    if [[ ! -d "$venv_dir" ]]; then
+      # --system-site-packages so the venv can SEE the pacman-installed SoapySDR / PyQt6
+      # bindings (those are system packages, not on PyPI).
+      python -m venv --system-site-packages "$venv_dir" || {
+        err "Failed to create virtualenv at $venv_dir"; return 1; }
+      ok "Created virtualenv (with --system-site-packages) at $venv_dir"
+    else
+      log "Reusing existing virtualenv at $venv_dir"
+    fi
+    # This script runs under bash/sh, so activate with the POSIX script for its own installs.
+    # shellcheck disable=SC1091
+    source "$venv_dir/bin/activate"
+    python -m pip install --upgrade pip
+    python -m pip install -r "$reqs" || warn "Some Python requirements failed to install."
+    deactivate 2>/dev/null || true
+    print_venv_activation_hint "$venv_dir"
+    return 0
+  fi
+
   log "Installing Python package requirements…"
   local pip_bin="pip3"
   command -v pip3 >/dev/null 2>&1 || pip_bin="pip"
   "$pip_bin" install --upgrade pip
-  "$pip_bin" install -r "$(dirname "$0")/requirements.txt" || \
+  "$pip_bin" install -r "$reqs" || \
     warn "Some Python requirements failed to install."
 }
 
@@ -137,10 +187,14 @@ main() {
     *) err "Unsupported/unknown OS. Please install SoapySDR + drivers manually."; ;;
   esac
   install_udev || warn "udev rule installation skipped/failed."
-  install_python_deps
+  install_python_deps "$os"
   test_install
   ok "Done. If you just added udev rules, unplug/replug your SDR (or reboot)."
   ok "Add yourself to the 'plugdev' group if needed:  sudo usermod -aG plugdev \$USER"
+  if [[ "$os" == "arch" ]]; then
+    warn "Reminder (Arch/CachyOS): activate the .venv before running — fish users:"
+    warn "    source .venv/bin/activate.fish   (bash/zsh: source .venv/bin/activate)"
+  fi
 }
 
 main "$@"
