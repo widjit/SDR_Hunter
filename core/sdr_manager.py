@@ -139,10 +139,14 @@ class SoapyRXDevice(SDRDevice):
         self._dev = None  # type: ignore
         self._streams: Dict[int, Any] = {}
 
-    def open(self, args: Optional[Dict[str, str]] = None) -> None:  # pragma: no cover
+    def open(self, args: Any = None) -> None:  # pragma: no cover
         if not HAVE_SOAPY:
             raise RuntimeError("SoapySDR not available")
-        self._dev = SoapySDR.Device(args or self._args)
+        # ``args`` may be a plain dict OR a SoapySDRKwargs object returned by
+        # Device.enumerate(); pass whichever we were given straight through
+        # (do not rely on truthiness of the SWIG object).
+        open_args = self._args if args is None else args
+        self._dev = SoapySDR.Device(open_args)
         self._refresh_profile_from_device()
         self._open = True
 
@@ -278,36 +282,71 @@ class DeviceManager:
         # Real device path.
         profile = profile_from_defaults(driver or "mock", driver, serial)
 
-        def _try_open(open_args: Dict[str, str]) -> SDRDevice:  # pragma: no cover
+        def _try_open(open_args: Any) -> SDRDevice:  # pragma: no cover
             dev = SoapyRXDevice(dict(open_args), profile)
-            dev.open(dict(open_args))
+            dev.open(open_args)
             return dev
 
-        try:  # pragma: no cover - hardware dependent
-            dev = _try_open(args)
-            logger.info("Opened SoapySDR device: %s", args)
-            return dev
-        except Exception as exc:  # noqa: BLE001  # pragma: no cover
-            # A very common failure mode is a serial-qualified open that does
-            # not match even though the driver alone opens fine (the serial the
-            # SoapySDR binding reports at enumerate time can differ subtly from
-            # what the make() matcher expects). Retry with driver only before
-            # giving up.
-            if "serial" in args and "driver" in args:
-                retry = {k: v for k, v in args.items() if k != "serial"}
-                logger.warning(
-                    "Open failed for %s (%s); retrying with driver only: %s",
-                    args, exc, retry)
-                try:
-                    dev = _try_open(retry)
-                    logger.info(
-                        "Opened SoapySDR device via driver-only fallback: %s",
-                        retry)
-                    return dev
-                except Exception as exc2:  # noqa: BLE001
-                    exc = exc2
-            raise RuntimeError(self._open_error_message(driver, serial, exc)) \
-                from exc
+        # Preferred path: match the request against the live enumerate()
+        # results and open with the *exact* kwargs object SoapySDR returned.
+        # Some SoapySDR modules (notably SoapySDRPlay3) only match on the full
+        # enumerate kwargs -- a hand-built {driver, serial} dict returns
+        # "no match" even though the device is present and free.
+        resolved = self._resolve_enumerated_args(driver, serial)
+        attempts: List[Any] = []  # pragma: no cover
+        if resolved is not None:  # pragma: no cover
+            attempts.append(resolved)
+        attempts.append(args)  # driver+serial as requested
+        if "serial" in args and "driver" in args:  # driver-only fallback
+            attempts.append({k: v for k, v in args.items() if k != "serial"})
+
+        last_exc: Optional[Exception] = None  # pragma: no cover
+        for attempt in attempts:  # pragma: no cover
+            try:
+                dev = _try_open(attempt)
+                logger.info("Opened SoapySDR device: %s", dict(attempt))
+                return dev
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.warning("Open attempt failed for %s: %s",
+                               dict(attempt), exc)
+        raise RuntimeError(  # pragma: no cover
+            self._open_error_message(driver, serial,
+                                     last_exc or RuntimeError("no match"))) \
+            from last_exc
+
+    def _resolve_enumerated_args(self, driver: str, serial: str):  # pragma: no cover
+        """Return the live enumerate() kwargs matching driver/serial, or None.
+
+        Opening with the exact object SoapySDR.Device.enumerate() returns is the
+        most reliable way to open a device: it carries every key the driver's
+        matcher expects (driver, label, serial), which a hand-built dict may
+        lack.
+        """
+        if not HAVE_SOAPY:
+            return None
+        try:
+            results = SoapySDR.Device.enumerate()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("enumerate() during open failed: %s", exc)
+            return None
+        want_driver = (driver or "").lower()
+        best = None
+        for res in results:
+            info = {k: res[k] for k in res.keys()}
+            r_driver = (info.get("driver") or info.get("hardware") or "").lower()
+            r_serial = info.get("serial", "")
+            if want_driver and r_driver != want_driver:
+                continue
+            if serial and r_serial and r_serial != serial:
+                continue
+            # Exact serial match wins immediately; otherwise remember first
+            # driver match as a fallback.
+            if serial and r_serial == serial:
+                return res
+            if best is None:
+                best = res
+        return best
 
     @staticmethod
     def _open_error_message(driver: str, serial: str, exc: Exception) -> str:
