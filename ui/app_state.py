@@ -47,9 +47,18 @@ class AppState:
         if builtin:
             self.db.seed_known_signals(builtin)
 
-        # Matcher / detector.
+        # Matcher / detector. Detection thresholds come from settings so they
+        # can be tuned without code changes (see SDRSettings.detect_*).
         self.matcher = KnownSignalMatcher(builtin)
-        self.detector = SignalDetector(self.matcher)
+        self.detector = SignalDetector(
+            self.matcher,
+            threshold_db=self.settings.sdr.detect_threshold_db,
+            min_bin_width=self.settings.sdr.detect_min_bin_width,
+            min_snr_db=self.settings.sdr.detect_min_snr_db,
+            max_events=self.settings.sdr.detect_max_events,
+            guard_cells=self.settings.sdr.detect_guard_cells,
+            train_cells=self.settings.sdr.detect_train_cells,
+        )
 
         # Devices + engine.
         self.device_manager = DeviceManager(allow_mock=True)

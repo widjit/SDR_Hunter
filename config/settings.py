@@ -41,6 +41,18 @@ class SDRSettings:
     scan_dwell_ms: int = 200
     auto_record_seconds: int = 180  # 3 minutes for unknown signals
 
+    # -- Detection tunables ------------------------------------------------
+    # These control how aggressively the signal detector flags energy as a
+    # "signal". Defaults are tuned to avoid false positives on real hardware
+    # noise (e.g. an SDRplay RSP). Lower the threshold to catch weaker
+    # signals; raise it if you get too many noise detections.
+    detect_threshold_db: float = 10.0   # CFAR margin above local noise avg
+    detect_min_bin_width: int = 3       # min contiguous bins for a detection
+    detect_min_snr_db: float = 6.0      # final gate: peak - noise floor
+    detect_max_events: int = 50         # cap detections per PSD frame
+    detect_guard_cells: int = 8         # CFAR guard band each side of a cell
+    detect_train_cells: int = 16        # CFAR training cells each side
+
 
 @dataclass
 class WebSettings:

@@ -68,13 +68,20 @@ class SignalDetector:
     """CFAR / threshold based signal detector operating on PSD arrays."""
 
     def __init__(self, matcher: Optional[KnownSignalMatcher] = None,
-                 guard_cells: int = 4, train_cells: int = 16,
-                 threshold_db: float = 8.0, min_bin_width: int = 2):
+                 guard_cells: int = 8, train_cells: int = 16,
+                 threshold_db: float = 10.0, min_bin_width: int = 3,
+                 min_snr_db: float = 6.0, max_events: int = 50):
         self.matcher = matcher or KnownSignalMatcher()
         self.guard_cells = guard_cells
         self.train_cells = train_cells
         self.threshold_db = threshold_db
         self.min_bin_width = min_bin_width
+        # Final SNR gate (peak power minus estimated noise floor) applied per
+        # detection, and a cap on how many detections a single PSD frame may
+        # emit (keeps the strongest). Both guard against noise storms on real
+        # hardware.
+        self.min_snr_db = min_snr_db
+        self.max_events = max_events
 
     # ------------------------------------------------------------------
     # CFAR
@@ -143,6 +150,10 @@ class SignalDetector:
             bandwidth_hz = width * bin_hz
             freq_hz = center_freq - fs / 2.0 + (peak_bin + 0.5) * bin_hz
             snr = peak_power - floor
+            # Final SNR gate: reject marginal detections that clear the local
+            # CFAR margin but are not meaningfully above the overall floor.
+            if snr < self.min_snr_db:
+                continue
             mod = self.modulation_hint(psd_db, start, end, bin_hz)
             match = self.matcher.match(freq_hz, bandwidth_hz, match_tolerance_hz)
             events.append(SignalEvent(
@@ -154,6 +165,12 @@ class SignalDetector:
                 is_known=match is not None,
                 signal_db_match=match,
             ))
+        # Cap the number of detections per frame, keeping the strongest by SNR.
+        # This prevents a noisy sweep from flooding the UI/database with
+        # hundreds of marginal hits.
+        if self.max_events and len(events) > self.max_events:
+            events.sort(key=lambda e: e.snr_db, reverse=True)
+            events = events[:self.max_events]
         return events
 
     # ------------------------------------------------------------------
