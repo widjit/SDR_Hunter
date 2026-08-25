@@ -277,10 +277,68 @@ class DeviceManager:
 
         # Real device path.
         profile = profile_from_defaults(driver or "mock", driver, serial)
-        dev = SoapyRXDevice(args, profile)  # pragma: no cover
-        dev.open(args)  # pragma: no cover
-        logger.info("Opened SoapySDR device: %s", args)  # pragma: no cover
-        return dev  # pragma: no cover
+
+        def _try_open(open_args: Dict[str, str]) -> SDRDevice:  # pragma: no cover
+            dev = SoapyRXDevice(dict(open_args), profile)
+            dev.open(dict(open_args))
+            return dev
+
+        try:  # pragma: no cover - hardware dependent
+            dev = _try_open(args)
+            logger.info("Opened SoapySDR device: %s", args)
+            return dev
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover
+            # A very common failure mode is a serial-qualified open that does
+            # not match even though the driver alone opens fine (the serial the
+            # SoapySDR binding reports at enumerate time can differ subtly from
+            # what the make() matcher expects). Retry with driver only before
+            # giving up.
+            if "serial" in args and "driver" in args:
+                retry = {k: v for k, v in args.items() if k != "serial"}
+                logger.warning(
+                    "Open failed for %s (%s); retrying with driver only: %s",
+                    args, exc, retry)
+                try:
+                    dev = _try_open(retry)
+                    logger.info(
+                        "Opened SoapySDR device via driver-only fallback: %s",
+                        retry)
+                    return dev
+                except Exception as exc2:  # noqa: BLE001
+                    exc = exc2
+            raise RuntimeError(self._open_error_message(driver, serial, exc)) \
+                from exc
+
+    @staticmethod
+    def _open_error_message(driver: str, serial: str, exc: Exception) -> str:
+        """Turn a raw SoapySDR make() failure into an actionable message."""
+        target = driver or "device"
+        if serial:
+            target = f"{target} (serial {serial})"
+        base = (
+            f"Could not open SDR {target}: {exc}\n"
+            "SoapySDR enumerated the device but failed to open it. Common "
+            "causes:\n"
+            "  - Another program is holding the device (e.g. SDRconnect, "
+            "GQRX, CubicSDR) -- close it and retry.\n"
+            "  - USB permissions: your user is not in the right group / udev "
+            "rules are not loaded (see HARDWARE_BRINGUP.md).\n")
+        d = (driver or "").lower()
+        if "bladerf" in d:
+            base += (
+                "  - BladeRF: FPGA bitstream not loaded or firmware too old. "
+                "Load the FPGA and update firmware -- see the BladeRF section "
+                "of HARDWARE_BRINGUP.md.\n")
+        elif "sdrplay" in d:
+            base += (
+                "  - SDRplay: the sdrplay_apiService daemon is not running "
+                "(check: systemctl status sdrplay), or the SoapySDRPlay3 "
+                "module is missing -- see the SDRplay section of "
+                "HARDWARE_BRINGUP.md.\n")
+        base += (
+            "Run `python -m tools.bringup_check` for a full diagnostic, or "
+            "start with SDRHUNTER_FORCE_MOCK=1 to use the synthetic device.")
+        return base
 
     @staticmethod
     def soapy_available() -> bool:
