@@ -53,6 +53,14 @@ class SDRSettings:
     detect_guard_cells: int = 8         # CFAR guard band each side of a cell
     detect_train_cells: int = 16        # CFAR training cells each side
 
+    # -- Detection list aggregation ---------------------------------------
+    # Control how the live detection list accumulates rows. Merging collapses
+    # the many-kHz-apart fragments of one wideband station (e.g. an FM
+    # broadcast carrier) into a single entry; expiry drops rows that have not
+    # been re-detected recently so the list reflects current activity.
+    detect_merge_tolerance_hz: float = 100000.0  # merge detections within this freq distance into one entry
+    detect_max_age_seconds: float = 120.0        # drop detections not seen for this long (<=0 disables)
+
 
 @dataclass
 class WebSettings:

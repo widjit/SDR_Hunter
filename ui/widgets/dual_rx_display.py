@@ -134,6 +134,15 @@ class DualRXDisplay(QWidget):
         ch = int(frame.get("channel", 0))
         (self.rx0 if ch == 0 else self.rx1).update_frame(frame)
 
+    def set_rx1_visible(self, visible: bool) -> None:
+        """Show or hide the RX1 (Focus) half. Hiding it collapses that pane in
+        the QSplitter so the RX0 (Scanner) half expands to fill the space."""
+        self.rx1.setVisible(bool(visible))
+        if visible:
+            self.splitter.setSizes([500, 500])
+        else:
+            self.splitter.setSizes([1000, 0])
+
     def _set_linked(self, on: bool) -> None:
         self._linked = on
         vb1 = self.rx1.spectrum.plot.getPlotItem().vb

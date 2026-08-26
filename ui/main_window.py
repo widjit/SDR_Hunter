@@ -115,7 +115,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.dual_display = DualRXDisplay()
-        self.signal_list = SignalListWidget()
+        self.signal_list = SignalListWidget(
+            merge_tolerance_hz=self.state.settings.sdr.detect_merge_tolerance_hz,
+            max_age_seconds=self.state.settings.sdr.detect_max_age_seconds)
         splitter.addWidget(self.dual_display)
         splitter.addWidget(self.signal_list)
         splitter.setSizes([1050, 450])
@@ -210,6 +212,15 @@ class MainWindow(QMainWindow):
         self._web_action.setCheckable(True)
         self._web_action.toggled.connect(self._on_web_action_toggled)
         self.m_view.addAction(self._web_action)
+        self.m_view.addSeparator()
+        # Checkable toggle for the RX1 (Focus) display. Visible by default;
+        # hiding it collapses the RX1 spectrum/waterfall so RX0 expands, and
+        # hides the left-panel "RX1 — Focus" device-control group.
+        self._rx1_action = QAction("Show RX1 (Focus)", self)
+        self._rx1_action.setCheckable(True)
+        self._rx1_action.setChecked(True)
+        self._rx1_action.toggled.connect(self._on_rx1_toggled)
+        self.m_view.addAction(self._rx1_action)
         self.m_view.addSeparator()
         self._act(self.m_view, "Reset Layout",
                   lambda: self.tiles.apply_preset("Standard"))
@@ -1132,6 +1143,19 @@ class MainWindow(QMainWindow):
     def _on_web_btn_toggled(self, on: bool) -> None:
         """Toolbar 🌐 button toggled by the user."""
         self._apply_web_toggle(on, persist=True)
+
+    def _on_rx1_toggled(self, on: bool) -> None:
+        """View → Show RX1 (Focus) toggled: show/hide the RX1 display and its
+        left-panel device-control group. RX0 expands when RX1 is hidden."""
+        try:
+            self.dual_display.set_rx1_visible(on)
+        except Exception:  # noqa: BLE001
+            pass
+        rx1_cfg = getattr(self.device_panel, "rx1_cfg", None)
+        if rx1_cfg is not None:
+            rx1_cfg.setVisible(on)
+        self.signals.notify_status(
+            "RX1 (Focus) shown" if on else "RX1 (Focus) hidden")
 
     def _on_web_action_toggled(self, on: bool) -> None:
         """View → Enable Web Dashboard menu item toggled by the user."""

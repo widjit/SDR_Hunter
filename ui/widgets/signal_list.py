@@ -43,8 +43,16 @@ class SignalListWidget(QWidget):
     favorite_toggled = pyqtSignal(float, bool)   # freq_hz, is_favorite
     bookmark_requested = pyqtSignal(dict)        # signal -> new bookmark
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None,
+                 merge_tolerance_hz: float = 100000.0,
+                 max_age_seconds: float = 120.0):
         super().__init__(parent)
+        # Detections within ``merge_tolerance_hz`` of an existing entry are
+        # merged into it instead of spawning a new row (collapses the many-kHz
+        # fragments of one wideband station). Entries not re-seen for longer
+        # than ``max_age_seconds`` are pruned; <= 0 disables expiry.
+        self._merge_tolerance_hz = float(merge_tolerance_hz)
+        self._max_age_seconds = float(max_age_seconds)
         self._rows: Dict[int, int] = {}       # freq_key -> table row
         self._data: Dict[int, dict] = {}      # freq_key -> signal dict
         self._filter_text = ""
@@ -122,16 +130,32 @@ class SignalListWidget(QWidget):
     # Ingest
     # ------------------------------------------------------------------
     def add_signal(self, sig: dict, alert: bool = False) -> None:
-        """Insert or update a signal row from a SignalEvent.to_dict()."""
+        """Insert or update a signal row from a SignalEvent.to_dict().
+
+        A new detection within ``merge_tolerance_hz`` of an existing entry is
+        merged into that entry (keeping the stronger peak and widening the
+        bandwidth span) rather than creating a new row. This collapses the
+        many-kHz-apart fragments of a single wideband station into one entry.
+        """
         try:
             freq = float(sig.get("freq_hz", 0.0))
         except Exception:  # noqa: BLE001
             return
-        key = int(round(freq / 1e3))  # kHz resolution key
-        sig = dict(sig)
-        sig["_alert"] = alert or bool(sig.get("_alert"))
-        sig["_seen"] = time.time()
-        self._data[key] = sig
+        incoming = dict(sig)
+        incoming["_alert"] = alert or bool(sig.get("_alert"))
+        incoming["_seen"] = time.time()
+
+        # Merge into a nearby existing entry if one is within tolerance.
+        key = self._find_existing_key(freq)
+        if key is None:
+            # No nearby entry: create a fresh row keyed at kHz resolution.
+            key = int(round(freq / 1e3))
+            incoming["_key"] = key
+            stored = incoming
+        else:
+            stored = self._merge_into(self._data[key], incoming)
+            stored["_key"] = key
+        self._data[key] = stored
 
         self.table.setSortingEnabled(False)
         if key in self._rows:
@@ -140,13 +164,65 @@ class SignalListWidget(QWidget):
             row = self.table.rowCount()
             self.table.insertRow(row)
             self._rows[key] = row
-        self._populate_row(row, sig)
+        self._populate_row(row, stored)
         self.table.setSortingEnabled(True)
-        self._apply_filter_row(row, sig)
+        self._apply_filter_row(row, stored, key)
         self.count_label.setText(f"{len(self._data)} signals")
         self.count_changed.emit(len(self._data))
-        self._add_history(sig)
+        self._add_history(incoming)
         self._rebuild_tree()
+
+    def _find_existing_key(self, freq: float) -> Optional[int]:
+        """Return the key of the nearest existing entry within the merge
+        tolerance of ``freq``, or ``None`` if there is no match."""
+        tol = self._merge_tolerance_hz
+        if tol <= 0:
+            # Merging disabled: fall back to strict kHz keying.
+            k = int(round(freq / 1e3))
+            return k if k in self._data else None
+        best_key: Optional[int] = None
+        best_dist: Optional[float] = None
+        for k, s in self._data.items():
+            d = abs(float(s.get("freq_hz", 0.0)) - freq)
+            if d <= tol and (best_dist is None or d < best_dist):
+                best_dist = d
+                best_key = k
+        return best_key
+
+    @staticmethod
+    def _merge_into(existing: dict, new: dict) -> dict:
+        """Fold ``new`` into ``existing``: keep the stronger power (and its
+        peak frequency / modulation), widen the bandwidth to the union span,
+        refresh match info and timestamps."""
+        e = dict(existing)
+        e_pow = float(existing.get("power_db", -999.0))
+        n_pow = float(new.get("power_db", -999.0))
+        e_f = float(existing.get("freq_hz", 0.0))
+        n_f = float(new.get("freq_hz", 0.0))
+        e_bw = float(existing.get("bandwidth_hz", 0.0))
+        n_bw = float(new.get("bandwidth_hz", 0.0))
+
+        # Union span of both center±bw/2 (never shrink the recorded bandwidth).
+        lo = min(e_f - e_bw / 2.0, n_f - n_bw / 2.0)
+        hi = max(e_f + e_bw / 2.0, n_f + n_bw / 2.0)
+        e["bandwidth_hz"] = max(hi - lo, e_bw, n_bw)
+
+        if n_pow >= e_pow:
+            e["power_db"] = n_pow
+            e["freq_hz"] = n_f  # track the strongest peak's frequency
+            if new.get("modulation_hint"):
+                e["modulation_hint"] = new.get("modulation_hint")
+
+        # Refresh / keep known-signal match info.
+        if new.get("signal_db_match"):
+            e["signal_db_match"] = new.get("signal_db_match")
+            e["is_known"] = bool(new.get("is_known", e.get("is_known")))
+        elif new.get("is_known"):
+            e["is_known"] = True
+
+        e["_seen"] = new.get("_seen", time.time())
+        e["_alert"] = bool(existing.get("_alert")) or bool(new.get("_alert"))
+        return e
 
     def _add_history(self, sig: dict) -> None:
         freq = float(sig.get("freq_hz", 0.0))
@@ -207,7 +283,8 @@ class SignalListWidget(QWidget):
             self.table.setItem(row, col, item)
 
     def refresh_ages(self) -> None:
-        """Update the Age column for all rows (call on a timer)."""
+        """Prune stale entries then update the Age column (call on a timer)."""
+        self.prune_stale()
         now = time.time()
         for key, row in self._rows.items():
             sig = self._data.get(key)
@@ -217,6 +294,49 @@ class SignalListWidget(QWidget):
             item = self.table.item(row, 6)
             if item:
                 item.setText(str(age))
+
+    def prune_stale(self) -> None:
+        """Drop entries not re-seen within ``max_age_seconds``.
+
+        A value <= 0 disables expiry. History is a separate capped log and is
+        left untouched. The table is rebuilt after removals so the
+        ``key -> row`` index map stays consistent (removing a QTableWidget row
+        shifts every higher row index).
+        """
+        max_age = self._max_age_seconds
+        if max_age is None or max_age <= 0:
+            return
+        now = time.time()
+        stale = [k for k, s in self._data.items()
+                 if (now - float(s.get("_seen", now))) > max_age]
+        if not stale:
+            return
+        for k in stale:
+            self._data.pop(k, None)
+            self._rows.pop(k, None)
+            self._favorites.discard(k)
+        self._rebuild_table()
+        self.count_label.setText(f"{len(self._data)} signals")
+        self.count_changed.emit(len(self._data))
+        self._rebuild_tree()
+
+    def _rebuild_table(self) -> None:
+        """Rebuild the detections table and ``_rows`` map from ``_data``."""
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        self._rows = {}
+        now = time.time()
+        for key, sig in self._data.items():
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self._rows[key] = row
+            self._populate_row(row, sig)
+            age = int(now - float(sig.get("_seen", now)))
+            item = self.table.item(row, 6)
+            if item:
+                item.setText(str(age))
+            self._apply_filter_row(row, sig, key)
+        self.table.setSortingEnabled(True)
 
     # ------------------------------------------------------------------
     # Filtering
@@ -233,12 +353,15 @@ class SignalListWidget(QWidget):
 
     def _reapply_filters(self) -> None:
         for key, row in self._rows.items():
-            self._apply_filter_row(row, self._data.get(key, {}))
+            self._apply_filter_row(row, self._data.get(key, {}), key)
 
-    def _apply_filter_row(self, row: int, sig: dict) -> None:
+    def _apply_filter_row(self, row: int, sig: dict, key: Optional[int] = None) -> None:
         visible = True
         cat = self.cat.currentText()
-        key = int(round(float(sig.get("freq_hz", 0.0)) / 1e3)) if sig else 0
+        if key is None:
+            key = sig.get("_key") if sig else None
+        if key is None:
+            key = int(round(float(sig.get("freq_hz", 0.0)) / 1e3)) if sig else 0
         if cat == "Known" and not sig.get("is_known"):
             visible = False
         elif cat == "Unknown" and sig.get("is_known"):
@@ -320,7 +443,9 @@ class SignalListWidget(QWidget):
     # Favorites / bookmarks / quick-tune / tree
     # ------------------------------------------------------------------
     def _toggle_favorite(self, freq_hz: float) -> None:
-        key = int(round(freq_hz / 1e3))
+        key = self._find_existing_key(freq_hz)
+        if key is None:
+            key = int(round(freq_hz / 1e3))
         if key in self._favorites:
             self._favorites.discard(key)
             fav = False
