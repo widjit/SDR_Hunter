@@ -61,6 +61,13 @@ class SDRSettings:
     detect_merge_tolerance_hz: float = 100000.0  # merge detections within this freq distance into one entry
     detect_max_age_seconds: float = 120.0        # drop detections not seen for this long (<=0 disables)
 
+    # -- User-defined scan range ------------------------------------------
+    # Explicit start/stop frequencies for the RX0 sweep. When start < stop the
+    # scanner hops across [scan_start_hz, scan_stop_hz]; otherwise the UI falls
+    # back to a single span centred on the RX0 frequency box.
+    scan_start_hz: float = 88.0e6
+    scan_stop_hz: float = 108.0e6
+
 
 @dataclass
 class WebSettings:

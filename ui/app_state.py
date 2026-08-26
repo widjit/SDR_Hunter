@@ -26,6 +26,7 @@ from core.recording_engine import IQRecorder
 from core.sdr_manager import DeviceManager
 from core.signal_detector import (KnownSignalMatcher, SignalDetector,
                                      SignalEvent)
+from core.spectrum_recorder import SpectrumRecorder, default_spectrum_path
 from database.signal_db import SignalDB
 from decoders.audio_classifier import AudioClassifier
 from decoders.drone_id.drone_signal_detector import DroneSignalDetector
@@ -63,6 +64,8 @@ class AppState:
         # Devices + engine.
         self.device_manager = DeviceManager(allow_mock=True)
         self.recorder = IQRecorder(self.settings.recordings_dir)
+        # Lightweight PSD-frame recorder for the RX0 waterfall/scope replay.
+        self.spectrum_recorder = SpectrumRecorder()
         self.baseline_manager = BaselineManager(self.settings.baselines_dir)
         self.engine = DualRXEngine(
             device_manager=self.device_manager,
@@ -130,6 +133,14 @@ class AppState:
     # ------------------------------------------------------------------
     def _on_spectrum(self, channel: int, center_freq: float, fs: float,
                      psd_db: np.ndarray) -> None:
+        # Tap the RX0 (scanner) PSD stream for optional spectrum recording,
+        # using the raw float array before it is rounded/serialised below.
+        if channel == 0 and self.spectrum_recorder.is_recording:
+            try:
+                self.spectrum_recorder.add_frame(
+                    center_freq, fs, psd_db, channel=channel)
+            except Exception:  # noqa: BLE001
+                pass
         frame = {
             "channel": channel,
             "center_freq": center_freq,
@@ -169,6 +180,30 @@ class AppState:
     # ------------------------------------------------------------------
     def list_devices(self) -> List[Dict[str, str]]:
         return self.device_manager.enumerate_devices()
+
+    def apply_detection_settings(self) -> None:
+        """Push the current ``settings.sdr.detect_*`` values into the live
+        :class:`SignalDetector` so changes made in the Settings dialog take
+        effect without restarting. The detection-list widget's merge/expiry
+        attributes are updated by the UI layer (it owns that widget)."""
+        s = self.settings.sdr
+        d = self.detector
+        d.threshold_db = s.detect_threshold_db
+        d.min_bin_width = s.detect_min_bin_width
+        d.min_snr_db = s.detect_min_snr_db
+        d.max_events = s.detect_max_events
+        d.guard_cells = s.detect_guard_cells
+        d.train_cells = s.detect_train_cells
+
+    def start_spectrum_recording(self, path: Optional[str] = None) -> str:
+        """Start recording the RX0 PSD frame stream. Returns the file path."""
+        if path is None:
+            path = default_spectrum_path(self.settings.recordings_dir)
+        return self.spectrum_recorder.start(path, channel=0)
+
+    def stop_spectrum_recording(self) -> Optional[str]:
+        """Stop spectrum recording and write the file. Returns the path."""
+        return self.spectrum_recorder.stop()
 
     def start_scan(self, freq_start: float, freq_end: float,
                    step: Optional[float] = None,

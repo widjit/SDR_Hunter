@@ -95,11 +95,74 @@ class SettingsDialog(QDialog):
 
     def _build_detection(self, extras) -> None:
         f = self._page("Detection")
-        self.cfar = QDoubleSpinBox()
-        self.cfar.setRange(1.0, 40.0)
-        self.cfar.setValue(extras.get("cfar_threshold_db", 8.0))
-        self.cfar.setSuffix(" dB")
-        f.addRow("CFAR threshold", self.cfar)
+        sdr = self._settings.sdr
+
+        # --- Live detector tunables (persisted in SDRSettings.detect_*) -----
+        f.addRow(self._section_label("Signal Detection (CFAR)"))
+        self.detect_threshold = QDoubleSpinBox()
+        self.detect_threshold.setRange(0.5, 60.0)
+        self.detect_threshold.setDecimals(1)
+        self.detect_threshold.setValue(sdr.detect_threshold_db)
+        self.detect_threshold.setSuffix(" dB")
+        self.detect_threshold.setToolTip("CFAR margin above the local noise "
+                                         "average for a bin to count as signal")
+        f.addRow("Detection threshold", self.detect_threshold)
+
+        self.detect_min_snr = QDoubleSpinBox()
+        self.detect_min_snr.setRange(0.0, 60.0)
+        self.detect_min_snr.setDecimals(1)
+        self.detect_min_snr.setValue(sdr.detect_min_snr_db)
+        self.detect_min_snr.setSuffix(" dB")
+        self.detect_min_snr.setToolTip("Final gate: peak power minus noise floor")
+        f.addRow("Min SNR", self.detect_min_snr)
+
+        self.detect_min_bw = QSpinBox()
+        self.detect_min_bw.setRange(1, 512)
+        self.detect_min_bw.setValue(sdr.detect_min_bin_width)
+        self.detect_min_bw.setSuffix(" bins")
+        self.detect_min_bw.setToolTip("Minimum contiguous FFT bins for a detection")
+        f.addRow("Min bin width", self.detect_min_bw)
+
+        self.detect_max_events = QSpinBox()
+        self.detect_max_events.setRange(1, 1000)
+        self.detect_max_events.setValue(sdr.detect_max_events)
+        self.detect_max_events.setToolTip("Cap on detections per PSD frame")
+        f.addRow("Max events/frame", self.detect_max_events)
+
+        self.detect_guard = QSpinBox()
+        self.detect_guard.setRange(0, 128)
+        self.detect_guard.setValue(sdr.detect_guard_cells)
+        self.detect_guard.setToolTip("CFAR guard cells each side of a cell")
+        f.addRow("Guard cells", self.detect_guard)
+
+        self.detect_train = QSpinBox()
+        self.detect_train.setRange(1, 256)
+        self.detect_train.setValue(sdr.detect_train_cells)
+        self.detect_train.setToolTip("CFAR training cells each side of a cell")
+        f.addRow("Training cells", self.detect_train)
+
+        # --- Detection list (merge / expiry) -------------------------------
+        f.addRow(self._section_label("Detection List"))
+        self.detect_merge_khz = QDoubleSpinBox()
+        self.detect_merge_khz.setRange(0.0, 5000.0)
+        self.detect_merge_khz.setDecimals(1)
+        self.detect_merge_khz.setValue(sdr.detect_merge_tolerance_hz / 1e3)
+        self.detect_merge_khz.setSuffix(" kHz")
+        self.detect_merge_khz.setToolTip("Merge detections within this distance "
+                                        "into one list entry (0 disables merging)")
+        f.addRow("Merge tolerance", self.detect_merge_khz)
+
+        self.detect_max_age = QDoubleSpinBox()
+        self.detect_max_age.setRange(0.0, 86400.0)
+        self.detect_max_age.setDecimals(0)
+        self.detect_max_age.setValue(sdr.detect_max_age_seconds)
+        self.detect_max_age.setSuffix(" s")
+        self.detect_max_age.setToolTip("Drop list entries not re-seen for this "
+                                      "long (0 or less disables expiry)")
+        f.addRow("Max age (0 = disabled)", self.detect_max_age)
+
+        # --- UI-only extras (kept for backward compatibility) --------------
+        f.addRow(self._section_label("Bandwidth / display"))
         self.min_dur = QDoubleSpinBox()
         self.min_dur.setRange(0.0, 10.0)
         self.min_dur.setValue(extras.get("min_signal_duration_s", 0.0))
@@ -109,6 +172,12 @@ class SettingsDialog(QDialog):
         self.bw_method.addItems(["contiguous-bins", "-3dB", "-6dB", "occupied-99%"])
         self.bw_method.setCurrentText(extras.get("bw_method", "contiguous-bins"))
         f.addRow("Bandwidth estimation", self.bw_method)
+
+    @staticmethod
+    def _section_label(text: str):
+        from PyQt6.QtWidgets import QLabel
+        lbl = QLabel(f"<b>{text}</b>")
+        return lbl
 
     def _build_recording(self, extras) -> None:
         f = self._page("Recording")
@@ -201,6 +270,15 @@ class SettingsDialog(QDialog):
         s.sdr.default_sample_rate = self.def_rate.value() * 1e6
         s.sdr.fft_size = int(self.fft_size.currentText())
         s.sdr.auto_record_seconds = self.auto_dur.value()
+        # Live detector tunables + detection-list merge/expiry.
+        s.sdr.detect_threshold_db = self.detect_threshold.value()
+        s.sdr.detect_min_snr_db = self.detect_min_snr.value()
+        s.sdr.detect_min_bin_width = int(self.detect_min_bw.value())
+        s.sdr.detect_max_events = int(self.detect_max_events.value())
+        s.sdr.detect_guard_cells = int(self.detect_guard.value())
+        s.sdr.detect_train_cells = int(self.detect_train.value())
+        s.sdr.detect_merge_tolerance_hz = self.detect_merge_khz.value() * 1e3
+        s.sdr.detect_max_age_seconds = self.detect_max_age.value()
         s.recordings_dir = self.rec_path.text()
         s.web.enabled = self.web_enabled.isChecked()
         s.web.port = self.web_port.value()
@@ -213,7 +291,6 @@ class SettingsDialog(QDialog):
             "units": self.units.currentText(),
             "window": self.window.currentText(),
             "overlap": self.overlap.value(),
-            "cfar_threshold_db": self.cfar.value(),
             "min_signal_duration_s": self.min_dur.value(),
             "bw_method": self.bw_method.currentText(),
             "rec_format": self.rec_format.currentText(),

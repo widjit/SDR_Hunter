@@ -72,6 +72,14 @@ class MainWindow(QMainWindow):
         self._recording_dialog: Optional[RecordingManagerDialog] = None
         self._extras: Dict = {}
 
+        # Spectrum replay state (offline playback of a recorded PSD stream).
+        self._replay = None                 # SpectrumRecording or None
+        self._replay_timer: Optional[QTimer] = None
+        self._replay_index = 0
+        self._replaying = False
+        self._replay_paused = False
+        self._scan_was_active = False
+
         # ATAK bridge (shares settings; disabled until user enables output).
         self.atak = ATAKBridge.from_settings(self.state.settings.atak)
         self.atak.enabled = False
@@ -248,6 +256,13 @@ class MainWindow(QMainWindow):
 
         m_tools = mb.addMenu("&Tools")
         self._act(m_tools, "Recording Manager", self._open_recording_manager)
+        m_tools.addSeparator()
+        self._spectrum_rec_action = QAction("Record Spectrum", self)
+        self._spectrum_rec_action.setCheckable(True)
+        self._spectrum_rec_action.toggled.connect(self._on_spectrum_record_toggled)
+        m_tools.addAction(self._spectrum_rec_action)
+        self._act(m_tools, "Replay Spectrum…", self._open_spectrum_replay)
+        m_tools.addSeparator()
         self._act(m_tools, "Dual Signal Analysis Mode",
                   self._open_dual_signal_view)
         self._act(m_tools, "Audio Decoder",
@@ -285,6 +300,28 @@ class MainWindow(QMainWindow):
         for lbl, _ in SAMPLE_RATE_OPTIONS:
             self.rx0_rate.addItem(lbl)
         tb.addWidget(self.rx0_rate)
+
+        # User-defined scan range. When start < stop the RX0 sweep hops across
+        # [start, stop]; otherwise it falls back to center±rate/2 around RX0.
+        _sdr = self.state.settings.sdr
+        tb.addWidget(QLabel(" Scan "))
+        self.scan_start = QDoubleSpinBox()
+        self.scan_start.setRange(0.001, 2000.0)
+        self.scan_start.setDecimals(4)
+        self.scan_start.setValue(_sdr.scan_start_hz / 1e6)
+        self.scan_start.setSuffix(" MHz")
+        self.scan_start.setToolTip("Scan start frequency")
+        self.scan_start.valueChanged.connect(self._on_scan_range_changed)
+        tb.addWidget(self.scan_start)
+        tb.addWidget(QLabel("→"))
+        self.scan_stop = QDoubleSpinBox()
+        self.scan_stop.setRange(0.001, 2000.0)
+        self.scan_stop.setDecimals(4)
+        self.scan_stop.setValue(_sdr.scan_stop_hz / 1e6)
+        self.scan_stop.setSuffix(" MHz")
+        self.scan_stop.setToolTip("Scan stop frequency")
+        self.scan_stop.valueChanged.connect(self._on_scan_range_changed)
+        tb.addWidget(self.scan_stop)
 
         tb.addSeparator()
         tb.addWidget(QLabel(" RX1 "))
@@ -456,6 +493,10 @@ class MainWindow(QMainWindow):
     # Spectrum / signal slots
     # ==================================================================
     def _on_spectrum(self, frame: dict) -> None:
+        # While replaying a recording, drop any stray live frames so the two
+        # sources never fight over the display.
+        if self._replaying and not frame.get("_replay"):
+            return
         self._frame_count += 1
         ch = int(frame.get("channel", 0))
         self.dual_display.update_frame(frame)
@@ -511,11 +552,23 @@ class MainWindow(QMainWindow):
                 self.start_btn.setText("■ Stop Scan")
                 rate = SAMPLE_RATE_OPTIONS[self.rx0_rate.currentIndex()][1]
                 self.state.engine.scanner_cfg.sample_rate = rate
-                center = self.rx0_freq.value() * 1e6
-                span = rate
-                self.state.start_scan(center - span / 2, center + span / 2)
+                start_hz = self.scan_start.value() * 1e6
+                stop_hz = self.scan_stop.value() * 1e6
+                if start_hz > stop_hz:
+                    # Reversed inputs: swap so the sweep still covers the range.
+                    start_hz, stop_hz = stop_hz, start_hz
+                if start_hz >= stop_hz:
+                    # Degenerate (equal) range: fall back to a single span
+                    # centred on the RX0 frequency box (legacy behaviour).
+                    center = self.rx0_freq.value() * 1e6
+                    start_hz, stop_hz = center - rate / 2, center + rate / 2
+                    self.signals.notify_status(
+                        "Scan range empty — using RX0 center span")
+                # step = one span wide so hops tile the range contiguously.
+                self.state.start_scan(start_hz, stop_hz, rate)
                 self.led_rx0.set_state("active")
-                self.signals.notify_status("Scanning started")
+                self.signals.notify_status(
+                    f"Scanning {start_hz/1e6:.3f}–{stop_hz/1e6:.3f} MHz")
             else:
                 self.start_btn.setText("▶ Start Scan")
                 self.state.stop_scan()
@@ -526,6 +579,16 @@ class MainWindow(QMainWindow):
             self.led_rx0.set_state("error")
             QMessageBox.warning(self, "Scan error", str(exc))
             logger.exception("scan toggle failed")
+
+    def _on_scan_range_changed(self) -> None:
+        """Persist the scan Start/Stop inputs to settings when the user edits
+        them (so the range survives restarts)."""
+        try:
+            self.state.settings.sdr.scan_start_hz = self.scan_start.value() * 1e6
+            self.state.settings.sdr.scan_stop_hz = self.scan_stop.value() * 1e6
+            self.state.settings.save()
+        except Exception:  # noqa: BLE001
+            logger.debug("failed to persist scan range", exc_info=True)
 
     def _scan_range(self, start: float, end: float, step: float,
                     dwell: int) -> None:
@@ -1130,6 +1193,16 @@ class MainWindow(QMainWindow):
                 self.signals.notify_status("Settings saved")
             except Exception:  # noqa: BLE001
                 pass
+            # Push the (possibly changed) detection tunables into the live
+            # detector and detection-list widget so they take effect at once.
+            try:
+                self.state.apply_detection_settings()
+                self.signal_list._merge_tolerance_hz = float(
+                    self.state.settings.sdr.detect_merge_tolerance_hz)
+                self.signal_list._max_age_seconds = float(
+                    self.state.settings.sdr.detect_max_age_seconds)
+            except Exception:  # noqa: BLE001
+                logger.debug("failed to apply detection settings", exc_info=True)
             # Reconcile the live web dashboard with the (possibly changed)
             # persisted ``web.enabled`` preference from the dialog.
             desired = bool(self.state.settings.web.enabled)
@@ -1156,6 +1229,115 @@ class MainWindow(QMainWindow):
             rx1_cfg.setVisible(on)
         self.signals.notify_status(
             "RX1 (Focus) shown" if on else "RX1 (Focus) hidden")
+
+    # ==================================================================
+    # Spectrum record & replay
+    # ==================================================================
+    def _on_spectrum_record_toggled(self, on: bool) -> None:
+        """Tools → Record Spectrum: start/stop capturing the RX0 PSD stream."""
+        try:
+            if on:
+                path = self.state.start_spectrum_recording()
+                self.signals.notify_status(
+                    f"Recording spectrum → {os.path.basename(path)}")
+            else:
+                path = self.state.stop_spectrum_recording()
+                if path:
+                    n = 0
+                    try:
+                        from core.spectrum_recorder import SpectrumRecording
+                        n = SpectrumRecording.load(path).frame_count
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self.signals.notify_status(
+                        f"Spectrum saved: {os.path.basename(path)} ({n} frames)")
+                else:
+                    self.signals.notify_status("Spectrum recording: no frames")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("spectrum record toggle failed")
+            QMessageBox.warning(self, "Spectrum recording", str(exc))
+
+    def _open_spectrum_replay(self) -> None:
+        """Tools → Replay Spectrum…: pick a recording and play it back through
+        the RX0 waterfall/scope offline (the scanner is parked while playing)."""
+        if self._replaying:
+            self._stop_replay()
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Replay Spectrum Recording",
+            self.state.settings.recordings_dir,
+            "Spectrum recordings (*.npz);;All files (*)")
+        if not path:
+            return
+        try:
+            from core.spectrum_recorder import SpectrumRecording
+            self._replay = SpectrumRecording.load(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Replay Spectrum",
+                                f"Could not load recording:\n{exc}")
+            return
+        if self._replay.frame_count == 0:
+            QMessageBox.information(self, "Replay Spectrum",
+                                    "Recording contains no frames.")
+            self._replay = None
+            return
+        # Park live scanning so it doesn't fight the replay.
+        self._scan_was_active = bool(self.state.scanning)
+        if self._scan_was_active:
+            try:
+                self.state.stop_scan()
+            except Exception:  # noqa: BLE001
+                pass
+            self.start_btn.blockSignals(True)
+            self.start_btn.setChecked(False)
+            self.start_btn.setText("▶ Start Scan")
+            self.start_btn.blockSignals(False)
+        self._replay_index = 0
+        self._replaying = True
+        self._replay_paused = False
+        info = self._replay.info()
+        self._replay_timer = QTimer(self)
+        self._replay_timer.timeout.connect(self._replay_tick)
+        # ~20 fps playback cadence (kept simple; original timing not required).
+        self._replay_timer.start(50)
+        self.signals.notify_status(
+            f"Replaying {os.path.basename(path)} "
+            f"({info['frame_count']} frames, {info['duration']:.1f}s)")
+
+    def _replay_tick(self) -> None:
+        if not self._replaying or self._replay is None:
+            return
+        if self._replay_paused:
+            return
+        if self._replay_index >= self._replay.frame_count:
+            self._stop_replay(finished=True)
+            return
+        frame = self._replay.frame(self._replay_index)
+        frame["_replay"] = True
+        self._replay_index += 1
+        try:
+            self._on_spectrum(frame)
+        except Exception:  # noqa: BLE001
+            logger.debug("replay frame failed", exc_info=True)
+        if self._replay_index % 10 == 0 or \
+                self._replay_index == self._replay.frame_count:
+            self.signals.notify_status(
+                f"Replay {self._replay_index}/{self._replay.frame_count}")
+
+    def _stop_replay(self, finished: bool = False) -> None:
+        if self._replay_timer is not None:
+            self._replay_timer.stop()
+            self._replay_timer = None
+        self._replaying = False
+        self._replay_paused = False
+        self._replay = None
+        self._replay_index = 0
+        self.signals.notify_status(
+            "Replay finished" if finished else "Replay stopped")
+        # Resume live scanning if it was active before replay.
+        if self._scan_was_active:
+            self._scan_was_active = False
+            self.start_btn.setChecked(True)
 
     def _on_web_action_toggled(self, on: bool) -> None:
         """View → Enable Web Dashboard menu item toggled by the user."""
