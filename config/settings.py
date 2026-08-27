@@ -68,6 +68,12 @@ class SDRSettings:
     scan_start_hz: float = 88.0e6
     scan_stop_hz: float = 108.0e6
 
+    # -- Scope bandwidth zoom ---------------------------------------------
+    # Constrain the RX0 spectrum/scope view to a bandwidth window centred on
+    # the tuned/parked frequency. 0 (or negative) means "Full" span (the whole
+    # sample-rate width — the default behaviour).
+    scope_bw_hz: float = 0.0
+
 
 @dataclass
 class WebSettings:

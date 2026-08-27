@@ -161,6 +161,17 @@ class SettingsDialog(QDialog):
                                       "long (0 or less disables expiry)")
         f.addRow("Max age (0 = disabled)", self.detect_max_age)
 
+        # --- Scan speed ----------------------------------------------------
+        f.addRow(self._section_label("Scan"))
+        self.scan_dwell = QSpinBox()
+        self.scan_dwell.setRange(10, 5000)
+        self.scan_dwell.setSingleStep(10)
+        self.scan_dwell.setValue(int(sdr.scan_dwell_ms))
+        self.scan_dwell.setSuffix(" ms")
+        self.scan_dwell.setToolTip("Dwell time per hop (higher = slower / more "
+                                   "thorough). Applied on the next scan start.")
+        f.addRow("Scan dwell (speed)", self.scan_dwell)
+
         # --- UI-only extras (kept for backward compatibility) --------------
         f.addRow(self._section_label("Bandwidth / display"))
         self.min_dur = QDoubleSpinBox()
@@ -279,6 +290,7 @@ class SettingsDialog(QDialog):
         s.sdr.detect_train_cells = int(self.detect_train.value())
         s.sdr.detect_merge_tolerance_hz = self.detect_merge_khz.value() * 1e3
         s.sdr.detect_max_age_seconds = self.detect_max_age.value()
+        s.sdr.scan_dwell_ms = int(self.scan_dwell.value())
         s.recordings_dir = self.rec_path.text()
         s.web.enabled = self.web_enabled.isChecked()
         s.web.port = self.web_port.value()

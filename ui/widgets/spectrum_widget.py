@@ -48,6 +48,8 @@ class SpectrumWidget(QWidget):
         self._avg_buf: list[np.ndarray] = []
         self._last_center = 100e6
         self._last_fs = 2.048e6
+        # Scope bandwidth zoom (Hz). 0/negative => full span (auto).
+        self._zoom_bw_hz = 0.0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -108,6 +110,33 @@ class SpectrumWidget(QWidget):
         # Traces derived from channel 0 only (scanner).
         if channel == 0:
             self._update_holds(freqs_mhz, psd)
+            # Keep the scope BW zoom locked around the (possibly moving) center.
+            self._apply_zoom()
+
+    # ------------------------------------------------------------------
+    # Scope bandwidth zoom
+    # ------------------------------------------------------------------
+    def set_bandwidth_zoom(self, bw_hz: float) -> None:
+        """Constrain the x-axis to ``bw_hz`` centred on the current center.
+
+        ``bw_hz`` <= 0 restores the full-span (auto-range) behaviour. The zoom
+        follows the tuned/parked center: it is re-applied on every RX0 frame.
+        """
+        try:
+            self._zoom_bw_hz = max(0.0, float(bw_hz))
+        except (TypeError, ValueError):
+            self._zoom_bw_hz = 0.0
+        self._apply_zoom()
+
+    def _apply_zoom(self) -> None:
+        bw = self._zoom_bw_hz
+        if bw and bw > 0:
+            c = self._last_center / 1e6
+            half = (bw / 2.0) / 1e6
+            self.plot.setXRange(c - half, c + half, padding=0)
+        else:
+            # Full span: let pyqtgraph auto-range the x-axis to the data.
+            self.plot.enableAutoRange(axis="x")
 
     def _update_holds(self, freqs_mhz: np.ndarray, psd: np.ndarray) -> None:
         if self._peak_hold:

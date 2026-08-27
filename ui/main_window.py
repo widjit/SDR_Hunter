@@ -21,8 +21,8 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog,
                              QInputDialog, QLabel, QMainWindow, QMessageBox,
-                             QPushButton, QSplitter, QStackedWidget, QStatusBar,
-                             QTabBar, QToolBar, QVBoxLayout, QWidget)
+                             QPushButton, QSpinBox, QSplitter, QStackedWidget,
+                             QStatusBar, QTabBar, QToolBar, QVBoxLayout, QWidget)
 
 from atak.atak_bridge import ATAKBridge
 from config import settings as settings_mod
@@ -80,6 +80,9 @@ class MainWindow(QMainWindow):
         self._replay_paused = False
         self._scan_was_active = False
 
+        # Manual-tune (park) mode: RX0 stays on one frequency instead of hopping.
+        self._manual_tune = False
+
         # ATAK bridge (shares settings; disabled until user enables output).
         self.atak = ATAKBridge.from_settings(self.state.settings.atak)
         self.atak.enabled = False
@@ -123,6 +126,12 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.dual_display = DualRXDisplay()
+        # Apply any persisted scope-BW zoom to the RX0 spectrum view.
+        try:
+            self.dual_display.rx0.spectrum.set_bandwidth_zoom(
+                self.state.settings.sdr.scope_bw_hz)
+        except Exception:  # noqa: BLE001
+            pass
         self.signal_list = SignalListWidget(
             merge_tolerance_hz=self.state.settings.sdr.detect_merge_tolerance_hz,
             max_age_seconds=self.state.settings.sdr.detect_max_age_seconds)
@@ -322,6 +331,44 @@ class MainWindow(QMainWindow):
         self.scan_stop.setToolTip("Scan stop frequency")
         self.scan_stop.valueChanged.connect(self._on_scan_range_changed)
         tb.addWidget(self.scan_stop)
+
+        # Scan speed: per-hop dwell time (ms). Higher = slower/more thorough,
+        # lower = faster. Applied on the next scan start.
+        tb.addWidget(QLabel(" Dwell "))
+        self.dwell_spin = QSpinBox()
+        self.dwell_spin.setRange(10, 5000)
+        self.dwell_spin.setSingleStep(10)
+        self.dwell_spin.setValue(int(_sdr.scan_dwell_ms))
+        self.dwell_spin.setSuffix(" ms")
+        self.dwell_spin.setToolTip("Scan speed: dwell time per hop "
+                                   "(higher = slower/more thorough)")
+        self.dwell_spin.valueChanged.connect(self._on_dwell_changed)
+        tb.addWidget(self.dwell_spin)
+
+        # Manual tune: park RX0 on the RX0 freq box and stop hopping.
+        self.manual_btn = QPushButton("Manual Tune")
+        self.manual_btn.setCheckable(True)
+        self.manual_btn.setToolTip("Stop sweeping and park RX0 on the RX0 "
+                                   "frequency (dial around manually)")
+        self.manual_btn.toggled.connect(self._on_manual_tune_toggled)
+        tb.addWidget(self.manual_btn)
+        # Re-park RX0 immediately when the RX0 freq changes in manual mode.
+        self.rx0_freq.valueChanged.connect(self._on_rx0_freq_changed)
+
+        # Scope BW: constrain the RX0 spectrum view to a window (kHz) around the
+        # tuned/parked center. 0 = Full span.
+        tb.addWidget(QLabel(" Scope BW "))
+        self.scope_bw_spin = QDoubleSpinBox()
+        self.scope_bw_spin.setRange(0.0, 100000.0)
+        self.scope_bw_spin.setDecimals(1)
+        self.scope_bw_spin.setSingleStep(50.0)
+        self.scope_bw_spin.setValue(_sdr.scope_bw_hz / 1e3)
+        self.scope_bw_spin.setSuffix(" kHz")
+        self.scope_bw_spin.setSpecialValueText("Full")  # shown when value == 0
+        self.scope_bw_spin.setToolTip("Zoom the RX0 scope to this bandwidth "
+                                      "around center (0 = Full span)")
+        self.scope_bw_spin.valueChanged.connect(self._on_scope_bw_changed)
+        tb.addWidget(self.scope_bw_spin)
 
         tb.addSeparator()
         tb.addWidget(QLabel(" RX1 "))
@@ -549,9 +596,16 @@ class MainWindow(QMainWindow):
     def _toggle_scan(self, on: bool) -> None:
         try:
             if on:
+                # In manual-tune mode the sweep is disabled; the Start button
+                # instead just parks RX0 on the current frequency.
+                if self._manual_tune:
+                    self.start_btn.setText("■ Stop Scan")
+                    self._park_rx0()
+                    return
                 self.start_btn.setText("■ Stop Scan")
                 rate = SAMPLE_RATE_OPTIONS[self.rx0_rate.currentIndex()][1]
                 self.state.engine.scanner_cfg.sample_rate = rate
+                dwell = int(self.dwell_spin.value())
                 start_hz = self.scan_start.value() * 1e6
                 stop_hz = self.scan_stop.value() * 1e6
                 if start_hz > stop_hz:
@@ -565,10 +619,11 @@ class MainWindow(QMainWindow):
                     self.signals.notify_status(
                         "Scan range empty — using RX0 center span")
                 # step = one span wide so hops tile the range contiguously.
-                self.state.start_scan(start_hz, stop_hz, rate)
+                self.state.start_scan(start_hz, stop_hz, rate, dwell)
                 self.led_rx0.set_state("active")
                 self.signals.notify_status(
-                    f"Scanning {start_hz/1e6:.3f}–{stop_hz/1e6:.3f} MHz")
+                    f"Scanning {start_hz/1e6:.3f}–{stop_hz/1e6:.3f} MHz "
+                    f"(dwell {dwell} ms)")
             else:
                 self.start_btn.setText("▶ Start Scan")
                 self.state.stop_scan()
@@ -589,6 +644,85 @@ class MainWindow(QMainWindow):
             self.state.settings.save()
         except Exception:  # noqa: BLE001
             logger.debug("failed to persist scan range", exc_info=True)
+
+    def _on_dwell_changed(self, val: int) -> None:
+        """Persist the scan-speed (dwell) setting. Takes effect on next scan
+        start; if a scan is already running, the new dwell is applied live to
+        the scheduler's plan."""
+        try:
+            self.state.settings.sdr.scan_dwell_ms = int(val)
+            self.state.settings.save()
+            # Apply live to a running scan if the scheduler exposes a plan.
+            plan = getattr(self.state.engine.scheduler, "plan", None)
+            if plan is not None:
+                try:
+                    plan.dwell_ms = int(val)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            logger.debug("failed to persist dwell", exc_info=True)
+
+    # -- Manual tune (park) mode ------------------------------------------
+    def _park_rx0(self) -> None:
+        """Park the RX0 scanner on the RX0 frequency box (booting the engine if
+        needed so it keeps producing spectra/detections)."""
+        freq = self.rx0_freq.value() * 1e6
+        rate = SAMPLE_RATE_OPTIONS[self.rx0_rate.currentIndex()][1]
+        bw = getattr(self.state.engine.scanner_cfg, "bandwidth", None) or rate
+        self.state.engine.scanner_cfg.sample_rate = rate
+        # Engine must be running to emit frames; start it if idle then park.
+        if not self.state.scanning:
+            dwell = int(self.dwell_spin.value())
+            self.state.start_scan(freq - rate / 2, freq + rate / 2, rate, dwell)
+        self.state.engine.tune_scanner(freq, bandwidth=bw)
+        self.led_rx0.set_state("active")
+        self.signals.notify_status(
+            f"Manual tune: RX0 parked at {freq/1e6:.4f} MHz")
+
+    def _on_manual_tune_toggled(self, on: bool) -> None:
+        try:
+            self._manual_tune = bool(on)
+            # Disable the range sweep inputs while parked.
+            for w in (self.scan_start, self.scan_stop):
+                w.setEnabled(not on)
+            if on:
+                self._park_rx0()
+                # Reflect running state on the Start button without re-sweeping.
+                self.start_btn.blockSignals(True)
+                self.start_btn.setChecked(True)
+                self.start_btn.setText("■ Stop Scan")
+                self.start_btn.blockSignals(False)
+            else:
+                self.state.engine.release_scanner_park()
+                self.signals.notify_status(
+                    "Manual tune off — range sweep available")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("manual tune toggle failed")
+            QMessageBox.warning(self, "Manual tune error", str(exc))
+
+    def _on_rx0_freq_changed(self, val: float) -> None:
+        """Re-park RX0 immediately when the freq box changes in manual mode."""
+        if self._manual_tune:
+            try:
+                freq = float(val) * 1e6
+                bw = (getattr(self.state.engine.scanner_cfg, "bandwidth", None)
+                      or SAMPLE_RATE_OPTIONS[self.rx0_rate.currentIndex()][1])
+                self.state.engine.tune_scanner(freq, bandwidth=bw)
+                self.signals.notify_status(
+                    f"Manual tune: RX0 parked at {freq/1e6:.4f} MHz")
+            except Exception:  # noqa: BLE001
+                logger.debug("re-park failed", exc_info=True)
+
+    def _on_scope_bw_changed(self, khz: float) -> None:
+        """Apply the scope-BW zoom (kHz input -> Hz) to the RX0 spectrum view
+        and persist it."""
+        try:
+            bw_hz = float(khz) * 1e3
+            self.dual_display.rx0.spectrum.set_bandwidth_zoom(bw_hz)
+            self.state.settings.sdr.scope_bw_hz = bw_hz
+            self.state.settings.save()
+        except Exception:  # noqa: BLE001
+            logger.debug("failed to apply scope bw", exc_info=True)
 
     def _scan_range(self, start: float, end: float, step: float,
                     dwell: int) -> None:
@@ -1201,6 +1335,11 @@ class MainWindow(QMainWindow):
                     self.state.settings.sdr.detect_merge_tolerance_hz)
                 self.signal_list._max_age_seconds = float(
                     self.state.settings.sdr.detect_max_age_seconds)
+                # Reflect the dialog's scan-speed (dwell) in the toolbar spinbox
+                # without re-triggering its persist handler.
+                self.dwell_spin.blockSignals(True)
+                self.dwell_spin.setValue(int(self.state.settings.sdr.scan_dwell_ms))
+                self.dwell_spin.blockSignals(False)
             except Exception:  # noqa: BLE001
                 logger.debug("failed to apply detection settings", exc_info=True)
             # Reconcile the live web dashboard with the (possibly changed)
